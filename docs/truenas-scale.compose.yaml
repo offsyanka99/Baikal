@@ -62,7 +62,7 @@ services:
       - "31088:80"
 
     environment:
-      TZ: "Europe/Paris"
+      TZ: "America/Toronto"
       # Set to any value to skip entrypoint chown of /var/www/baikal:
       # BAIKAL_SKIP_CHOWN: "1"
       # Optional SMTP for invite emails (full msmtprc file contents):
