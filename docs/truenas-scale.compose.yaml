@@ -1,0 +1,91 @@
+# Baïkal — TrueNAS SCALE custom app (builds from YOUR GitHub fork)
+#
+# Use: Apps → Discover apps → Custom App / Install via YAML
+#      (Electric Eel / 24.10+ Docker-based SCALE)
+#
+# Image source: build from https://github.com/offsyanka99/Baikal (this fork)
+#   NOT ckulka/baikal and NOT sabre-io/Baikal directly.
+#
+# Requirements on the NAS:
+# - Outbound HTTPS to GitHub (and Docker Hub / packagist for base images + composer)
+# - First deploy builds the image (can take several minutes)
+#
+# Before deploy:
+# 1. Create dataset + dirs:
+#      mkdir -p /mnt/tank/apps/baikal/config /mnt/tank/apps/baikal/Specific/db
+# 2. Ownership for nginx user inside the image (uid/gid 101):
+#      chown -R 101:101 /mnt/tank/apps/baikal
+#    (entrypoint also chowns unless BAIKAL_SKIP_CHOWN is set)
+# 3. Edit volumes host path and host port below if needed
+# 4. Optional: pin a branch/tag in build.context (see comments)
+#
+# After deploy (first run):
+# 1. Open http://NAS-IP:31088
+# 2. Complete the Baikal web installer (admin password; SQLite is fine)
+# 3. Create users; CalDAV/CardDAV base URL:
+#      http://NAS-IP:31088/dav.php/
+#    Prefer HTTPS via reverse proxy in production.
+#
+# Rebuild after you push changes to the fork:
+#   Apps → baikal → Edit → stop/start, or force recreate so Compose rebuilds.
+#   Or: docker compose build --no-cache && docker compose up -d
+#
+# Docs: https://sabre.io/baikal/ · Dockerfile in repo root
+
+services:
+  baikal:
+    # --- Build from your fork (default) ------------------------------------
+    build:
+      # Branch or tag after #  — e.g. #master  #main  #0.11.1
+      context: https://github.com/offsyanka99/Baikal.git#master
+      # dockerfile: Dockerfile   # default; only set if you rename it
+    image: offsyanka99/baikal:local
+    pull_policy: build
+
+    # --- Or use a pre-built image you pushed (comment out build: above) ----
+    # image: ghcr.io/offsyanka99/baikal:latest
+
+    container_name: baikal
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.10"
+          memory: 64M
+
+    ports:
+      # Host:Container
+      - "31088:80"
+
+    environment:
+      TZ: "Europe/Paris"
+      # Set to any value to skip entrypoint chown of /var/www/baikal:
+      # BAIKAL_SKIP_CHOWN: "1"
+      # Optional SMTP for invite emails (full msmtprc file contents):
+      # MSMTPRC: |
+      #   defaults
+      #   auth on
+      #   tls on
+      #   ...
+
+    volumes:
+      # CHANGE to your TrueNAS dataset paths
+      - /mnt/tank/apps/baikal/config:/var/www/baikal/config
+      - /mnt/tank/apps/baikal/Specific:/var/www/baikal/Specific
+
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
