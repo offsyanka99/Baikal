@@ -1,28 +1,20 @@
-# Baïkal — multi-stage image built from this repository (not from ckulka/baikal).
-# Builds: composer install → nginx + PHP-FPM serving html/
-#
+# Baïkal — multi-stage image built from this repository.
 # Local:  docker build -t baikal:local .
-# TrueNAS / Compose: build.context = https://github.com/offsyanka99/Baikal.git#master
+# GHCR:   ghcr.io/offsyanka99/baikal:<tag>
 
 # ---------------------------------------------------------------------------
-# Stage 1: install PHP dependencies
+# Stage 1: install PHP dependencies from composer.lock (reproducible)
 # ---------------------------------------------------------------------------
 FROM composer:2 AS builder
 
 WORKDIR /src
 
-# Platform matches runtime PHP major used below
-COPY composer.json ./
+COPY composer.json composer.lock ./
 COPY Core ./Core
 COPY html ./html
 COPY LICENSE SECURITY.md ./
 
-# Install production PHP deps into /src/vendor (release-like layout).
-# audit.block-insecure=false: pinned ranges in composer.json may lag advisories;
-# bump deps in composer.json when you want a fully clean audit.
-RUN composer config platform.php 8.2 \
-    && composer config audit.block-insecure false \
-    && composer update --no-interaction --no-dev --prefer-dist --optimize-autoloader --no-audit \
+RUN composer install --no-interaction --no-dev --prefer-dist --optimize-autoloader \
     && rm -f composer.json composer.lock
 
 # ---------------------------------------------------------------------------
@@ -30,7 +22,6 @@ RUN composer config platform.php 8.2 \
 # ---------------------------------------------------------------------------
 FROM nginx:1
 
-# PHP 8.2 from Sury (matches Baikal ^8.1 requirement; 8.2 is widely available)
 RUN curl -fsSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends lsb-release ca-certificates \
@@ -50,6 +41,7 @@ RUN curl -fsSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/a
          sqlite3 \
          msmtp \
          msmtp-mta \
+         curl \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i 's/www-data/nginx/g' /etc/php/8.2/fpm/pool.d/www.conf \
     && sed -i 's|^listen = .*|listen = /var/run/php-fpm.sock|' /etc/php/8.2/fpm/pool.d/www.conf \
@@ -57,7 +49,6 @@ RUN curl -fsSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/a
     && sed -i 's/^;listen.group = .*/listen.group = nginx/' /etc/php/8.2/fpm/pool.d/www.conf \
     && sed -i 's/;clear_env = no/clear_env = no/' /etc/php/8.2/fpm/pool.d/www.conf
 
-# Application
 COPY --from=builder --chown=nginx:nginx /src /var/www/baikal
 RUN mkdir -p /var/www/baikal/config /var/www/baikal/Specific/db \
     && chown -R nginx:nginx /var/www/baikal
@@ -66,9 +57,7 @@ COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/entrypoint.d/ /docker-entrypoint.d/
 RUN chmod +x /docker-entrypoint.d/*.sh
 
-# Persist installer config + SQLite / uploaded data
 VOLUME ["/var/www/baikal/config", "/var/www/baikal/Specific"]
 
 EXPOSE 80
-# Official nginx image already runs /docker-entrypoint.d then nginx
-# CMD inherits: nginx -g 'daemon off;'
+# nginx image entrypoint runs /docker-entrypoint.d then nginx

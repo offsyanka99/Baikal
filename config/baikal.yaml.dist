@@ -3,12 +3,16 @@ system:
     timezone: 'Europe/Paris'
     card_enabled: true
     cal_enabled: true
+    tasks_enabled: true
+    notes_enabled: false
     invite_from: 'noreply@localhost'
     dav_auth_type: 'Digest'
-    admin_passwordhash: 5fe794627e1f841f8debba065e2c807a
+    # Set via installer / admin UI (password_hash). Do not commit real hashes.
+    admin_passwordhash: ''
     failed_access_message: 'user %u authentication failure for Baikal'
     auth_realm: BaikalDAV
     base_uri: ''
+    session_max_age_minutes: 15
 database:
     encryption_key: 5d3f0fa0192e3058ea70f1bb20924add
     backend: 'mysql'

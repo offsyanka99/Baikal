@@ -82,6 +82,13 @@ class Page extends \Flake\Core\Render\Container {
 
         header("X-Frame-Options: DENY");    # Prevent Clickjacking attacks
         header("X-Content-Type-Options: nosniff");    # Prevent code injection via mime type sniffing
+        header("Referrer-Policy: no-referrer");
+        header("X-XSS-Protection: 0");
+        header("Permissions-Policy: geolocation=(), microphone=(), camera=()");
+        header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
+        if (\Flake\Util\Tools::getCurrentProtocol() === "https") {
+            header("Strict-Transport-Security: max-age=31536000; includeSubDomains");
+        }
     }
 
     function render() {

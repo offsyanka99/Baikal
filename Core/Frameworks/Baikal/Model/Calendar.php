@@ -132,6 +132,9 @@ class Calendar extends \Flake\Core\Model\Db {
         }
 
         if ($sPropName === "todos") {
+            if (!\Baikal\Core\Tools::tasksEnabled()) {
+                $sValue = false;
+            }
             if (($sComponents = $this->get("components")) !== "") {
                 $aComponents = explode(",", $sComponents);
             } else {
@@ -152,6 +155,9 @@ class Calendar extends \Flake\Core\Model\Db {
         }
 
         if ($sPropName === "notes") {
+            if (!\Baikal\Core\Tools::notesEnabled()) {
+                $sValue = false;
+            }
             if (($sComponents = $this->get("components")) !== "") {
                 $aComponents = explode(",", $sComponents);
             } else {
@@ -214,17 +220,21 @@ class Calendar extends \Flake\Core\Model\Db {
             "label" => "Description",
         ]));
 
-        $oMorpho->add(new \Formal\Element\Checkbox([
-            "prop"  => "todos",
-            "label" => "Todos",
-            "help"  => "If checked, todos will be enabled on this calendar.",
-        ]));
+        if (\Baikal\Core\Tools::tasksEnabled()) {
+            $oMorpho->add(new \Formal\Element\Checkbox([
+                "prop"  => "todos",
+                "label" => "Todos",
+                "help"  => "If checked, todos will be enabled on this calendar.",
+            ]));
+        }
 
-        $oMorpho->add(new \Formal\Element\Checkbox([
-            "prop"  => "notes",
-            "label" => "Notes",
-            "help"  => "If checked, notes will be enabled on this calendar.",
-        ]));
+        if (\Baikal\Core\Tools::notesEnabled()) {
+            $oMorpho->add(new \Formal\Element\Checkbox([
+                "prop"  => "notes",
+                "label" => "Notes",
+                "help"  => "If checked, notes will be enabled on this calendar.",
+            ]));
+        }
 
         if ($this->floating()) {
             $oMorpho->element("uri")->setOption(

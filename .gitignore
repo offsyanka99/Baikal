@@ -7,7 +7,7 @@ config/.htaccess
 Specific/INSTALL_DISABLED
 
 # Composer stuff
-composer.lock
+# composer.lock is committed for reproducible Docker builds
 vendor
 
 # Build

@@ -49,6 +49,13 @@ class Tools {
             exit('<strong>Baikal Fatal Error</strong>: None of <strong>PDO::sqlite</strong>, <strong>PDO::mysql</strong> or <strong>PDO::pgsql</strong> are available. One of them at least is required by Baikal.');
         }
 
+        # Asserting XMLReader is available
+        # Without it, the install tool and admin GUI still work, but every CalDAV/CardDAV
+        # request fails deep inside sabre/xml with 'Class "XMLReader" not found'.
+        if (!class_exists('XMLReader')) {
+            exit('<strong>Baikal Fatal Error</strong>: The <strong>XMLReader</strong> class is unavailable. The <strong>xml</strong> PHP extension is required by Baikal.');
+        }
+
         # Assert that the temp folder is writable
         if (!\is_writable(\sys_get_temp_dir())) {
             exit('<strong>Baikal Fatal Error</strong>: The system temp directory is not writable.');
@@ -95,14 +102,90 @@ class Tools {
     static function getRequiredTablesList() {
         return [
             "addressbooks",
+            "addressbookchanges",
             "calendarobjects",
             "calendars",
+            "calendarinstances",
+            "calendarchanges",
+            "calendarsubscriptions",
+            "schedulingobjects",
             "cards",
             "groupmembers",
             "locks",
             "principals",
+            "propertystorage",
             "users",
         ];
+    }
+
+    /**
+     * Build default calendar component list from system settings.
+     *
+     * @return string Comma-separated iCalendar component names
+     */
+    static function defaultCalendarComponents() {
+        $components = ["VEVENT"];
+        $tasks = true;
+        $notes = false;
+        try {
+            if (defined("PROJECT_PATH_CONFIG") && file_exists(PROJECT_PATH_CONFIG . "baikal.yaml")) {
+                $config = \Symfony\Component\Yaml\Yaml::parseFile(PROJECT_PATH_CONFIG . "baikal.yaml");
+                if (isset($config["system"]["tasks_enabled"])) {
+                    $tasks = (bool) $config["system"]["tasks_enabled"];
+                }
+                if (isset($config["system"]["notes_enabled"])) {
+                    $notes = (bool) $config["system"]["notes_enabled"];
+                }
+            }
+        } catch (\Exception $e) {
+            // defaults above
+        }
+        if ($tasks) {
+            $components[] = "VTODO";
+        }
+        if ($notes) {
+            $components[] = "VJOURNAL";
+        }
+
+        return implode(",", $components);
+    }
+
+    /**
+     * Whether system policy allows VTODO (tasks) on calendars.
+     *
+     * @return bool
+     */
+    static function tasksEnabled() {
+        try {
+            if (defined("PROJECT_PATH_CONFIG") && file_exists(PROJECT_PATH_CONFIG . "baikal.yaml")) {
+                $config = \Symfony\Component\Yaml\Yaml::parseFile(PROJECT_PATH_CONFIG . "baikal.yaml");
+                if (isset($config["system"]["tasks_enabled"])) {
+                    return (bool) $config["system"]["tasks_enabled"];
+                }
+            }
+        } catch (\Exception $e) {
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether system policy allows VJOURNAL (notes) on calendars.
+     *
+     * @return bool
+     */
+    static function notesEnabled() {
+        try {
+            if (defined("PROJECT_PATH_CONFIG") && file_exists(PROJECT_PATH_CONFIG . "baikal.yaml")) {
+                $config = \Symfony\Component\Yaml\Yaml::parseFile(PROJECT_PATH_CONFIG . "baikal.yaml");
+                if (isset($config["system"]["notes_enabled"])) {
+                    return (bool) $config["system"]["notes_enabled"];
+                }
+            }
+        } catch (\Exception $e) {
+        }
+
+        return false;
     }
 
     static function isDBStructurallyComplete(\Flake\Core\Database $oDB) {

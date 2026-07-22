@@ -4,7 +4,6 @@ docs
 tests
 logs
 vendor
-composer.lock
 build
 config/baikal.yaml
 Specific/db/*

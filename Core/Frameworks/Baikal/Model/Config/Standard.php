@@ -32,17 +32,21 @@ use Symfony\Component\Yaml\Yaml;
 class Standard extends \Baikal\Model\Config {
     # Default values
     protected $aData = [
-        "configured_version"    => BAIKAL_VERSION,
-        "timezone"              => "Europe/Paris",
-        "card_enabled"          => true,
-        "cal_enabled"           => true,
-        "dav_auth_type"         => "Digest",
-        "admin_passwordhash"    => "",
-        "failed_access_message" => "user %u authentication failure for Baikal",
+        "configured_version"       => BAIKAL_VERSION,
+        "timezone"                 => "Europe/Paris",
+        "card_enabled"             => true,
+        "cal_enabled"              => true,
+        "tasks_enabled"            => true,
+        "notes_enabled"            => false,
+        "dav_auth_type"            => "Digest",
+        "admin_passwordhash"       => "",
+        "failed_access_message"    => "user %u authentication failure for Baikal",
         // While not editable as will change admin & any existing user passwords,
         // could be set to different value when migrating from legacy config
-        "auth_realm"            => "BaikalDAV",
-        "base_uri"              => "",
+        "auth_realm"               => "BaikalDAV",
+        "base_uri"                 => "",
+        // Admin UI idle session lifetime (minutes); rolling while active
+        "session_max_age_minutes"  => 15,
     ];
 
     function __construct() {
@@ -70,6 +74,18 @@ class Standard extends \Baikal\Model\Config {
             "label" => "Enable CalDAV",
         ]));
 
+        $oMorpho->add(new \Formal\Element\Checkbox([
+            "prop"  => "tasks_enabled",
+            "label" => "Enable Tasks (VTODO)",
+            "help"  => "When enabled, new calendars can include tasks and the default calendar gets VTODO. Requires CalDAV.",
+        ]));
+
+        $oMorpho->add(new \Formal\Element\Checkbox([
+            "prop"  => "notes_enabled",
+            "label" => "Enable Notes (VJOURNAL)",
+            "help"  => "When enabled, calendars may store notes as VJOURNAL. Client support is limited. Requires CalDAV.",
+        ]));
+
         $oMorpho->add(new \Formal\Element\Text([
             "prop"  => "invite_from",
             "label" => "Email invite sender address",
@@ -80,6 +96,14 @@ class Standard extends \Baikal\Model\Config {
             "prop"    => "dav_auth_type",
             "label"   => "WebDAV authentication type",
             "options" => ["Digest", "Basic", "Apache"],
+            "help"    => "Digest uses MD5 password hashes (protocol design). Prefer Basic over HTTPS. Apache uses web-server auth.",
+        ]));
+
+        $oMorpho->add(new \Formal\Element\Text([
+            "prop"       => "session_max_age_minutes",
+            "label"      => "Admin session timeout (minutes)",
+            "validation" => "required",
+            "help"       => "Idle lifetime for the admin web UI. Session is refreshed while you use the UI.",
         ]));
 
         $oMorpho->add(new \Formal\Element\Password([
@@ -125,6 +149,13 @@ class Standard extends \Baikal\Model\Config {
                     \BaikalAdmin\Core\Auth::hashAdminPassword($sValue, $this->aData["auth_realm"])
                 );
             }
+
+            return $this;
+        }
+
+        if ($sProp === "session_max_age_minutes") {
+            $minutes = max(1, (int) $sValue);
+            parent::set($sProp, $minutes);
 
             return $this;
         }

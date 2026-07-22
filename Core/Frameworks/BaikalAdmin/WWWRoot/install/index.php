@@ -90,8 +90,21 @@ if (!$config || !isset($config['system']["configured_version"])) {
             $oPage->zone("Payload")->addBlock(new \BaikalAdmin\Controller\Install\UpgradeConfirmation());
         }
     } elseif (!file_exists(PROJECT_PATH_SPECIFIC . '/INSTALL_DISABLED')) {
+        # Optional production hard-lock: set BAIKAL_LOCK_INSTALL=1 to refuse the
+        # wizard even if INSTALL_DISABLED is missing (e.g. after a volume mistake).
+        # Set BAIKAL_ALLOW_REINSTALL=1 to override for intentional recovery.
+        $forceLock = getenv('BAIKAL_LOCK_INSTALL') === '1';
+        $allowReinstall = getenv('BAIKAL_ALLOW_REINSTALL') === '1';
+        if ($forceLock && !$allowReinstall) {
+            @touch(PROJECT_PATH_SPECIFIC . '/INSTALL_DISABLED');
+            http_response_code(403);
+            echo "Installer is locked (BAIKAL_LOCK_INSTALL=1). "
+                . "Use the admin interface. Set BAIKAL_ALLOW_REINSTALL=1 to re-open the wizard.\n";
+            exit();
+        }
         $oPage->zone("Payload")->addBlock(new \BaikalAdmin\Controller\Install\Database());
     } else {
+        http_response_code(403);
         echo "Installation was already completed. Please head to the admin interface to modify any settings.\n";
         exit();
     }

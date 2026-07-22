@@ -1,49 +1,54 @@
-# Baïkal — TrueNAS SCALE custom app (builds from YOUR GitHub fork)
+# Baïkal — TrueNAS SCALE custom app (GHCR image from offsyanka99/Baikal)
 #
 # Use: Apps → Discover apps → Custom App / Install via YAML
 #      (Electric Eel / 24.10+ Docker-based SCALE)
 #
-# Image source: build from https://github.com/offsyanka99/Baikal (this fork)
-#   NOT ckulka/baikal and NOT sabre-io/Baikal directly.
-#
-# Requirements on the NAS:
-# - Outbound HTTPS to GitHub (and Docker Hub / packagist for base images + composer)
-# - First deploy builds the image (can take several minutes)
+# Default: pull pre-built multi-arch image from GitHub Container Registry.
+# Fallback: build from git (slower; needs GitHub + Packagist on the NAS).
 #
 # Before deploy:
-# 1. Create dataset + dirs:
+# 1. Dataset + dirs:
 #      mkdir -p /mnt/tank/apps/baikal/config /mnt/tank/apps/baikal/Specific/db
-# 2. Ownership for nginx user inside the image (uid/gid 101):
+# 2. Ownership for nginx inside the image (uid/gid 101):
 #      chown -R 101:101 /mnt/tank/apps/baikal
-#    (entrypoint also chowns unless BAIKAL_SKIP_CHOWN is set)
-# 3. Edit volumes host path and host port below if needed
-# 4. Optional: pin a branch/tag in build.context (see comments)
+# 3. Edit volumes host path and host port if needed
+# 4. Prefer HTTPS via TrueNAS reverse proxy / Caddy / Traefik in production
 #
-# After deploy (first run):
-# 1. Open http://NAS-IP:31088
-# 2. Complete the Baikal web installer (admin password; SQLite is fine)
-# 3. Create users; CalDAV/CardDAV base URL:
-#      http://NAS-IP:31088/dav.php/
-#    Prefer HTTPS via reverse proxy in production.
+# After deploy:
+# 1. Open http://NAS-IP:31088  → complete installer (admin password; SQLite OK)
+# 2. Admin: http://NAS-IP:31088/admin/
+# 3. DAV:   http://NAS-IP:31088/dav.php/
+# 4. Health: http://NAS-IP:31088/health.php
+# 5. Info:   http://NAS-IP:31088/info.php
 #
-# Rebuild after you push changes to the fork:
-#   Apps → baikal → Edit → stop/start, or force recreate so Compose rebuilds.
-#   Or: docker compose build --no-cache && docker compose up -d
+# Backup regularly (both mounts):
+#   config/   → baikal.yaml (admin hash, auth, feature flags)
+#   Specific/ → SQLite DB (Specific/db), INSTALL_DISABLED, rate-limit file
 #
-# Docs: https://sabre.io/baikal/ · Dockerfile in repo root
+# Auth notes:
+#   Digest auth stores MD5 A1 hashes for DAV users (protocol design).
+#   Prefer Basic + HTTPS when exposing outside LAN.
+#   Admin password uses password_hash(); legacy SHA-256 upgrades on login.
+#
+# Optional env:
+#   BAIKAL_LOCK_INSTALL=1     — refuse /admin/install after deploy
+#   BAIKAL_ALLOW_REINSTALL=1  — re-open installer intentionally
+#
+# Docs: docs/DEPLOYMENT.md · https://sabre.io/baikal/
 
 services:
   baikal:
-    # --- Build from your fork (default) ------------------------------------
-    build:
-      # Branch or tag after #  — e.g. #master  #main  #0.11.1
-      context: https://github.com/offsyanka99/Baikal.git#master
-      # dockerfile: Dockerfile   # default; only set if you rename it
-    image: offsyanka99/baikal:local
-    pull_policy: build
+    # --- Preferred: pre-built image (CI pushes on master / tags) -----------
+    image: ghcr.io/offsyanka99/baikal:latest
+    # Pin for production, e.g.:
+    # image: ghcr.io/offsyanka99/baikal:sha-<git-sha>
+    # image: ghcr.io/offsyanka99/baikal:0.11.1
 
-    # --- Or use a pre-built image you pushed (comment out build: above) ----
-    # image: ghcr.io/offsyanka99/baikal:latest
+    # --- Alternative: build from this fork on the NAS ---------------------
+    # build:
+    #   context: https://github.com/offsyanka99/Baikal.git#master
+    # image: offsyanka99/baikal:local
+    # pull_policy: build
 
     container_name: baikal
     restart: unless-stopped
@@ -58,27 +63,33 @@ services:
           memory: 64M
 
     ports:
-      # Host:Container
       - "31088:80"
 
     environment:
       TZ: "America/Toronto"
-      # Set to any value to skip entrypoint chown of /var/www/baikal:
+      # After first successful install, recommended for internet-facing hosts:
+      # BAIKAL_LOCK_INSTALL: "1"
       # BAIKAL_SKIP_CHOWN: "1"
-      # Optional SMTP for invite emails (full msmtprc file contents):
       # MSMTPRC: |
       #   defaults
       #   auth on
       #   tls on
-      #   ...
 
     volumes:
-      # CHANGE to your TrueNAS dataset paths
+      # CHANGE to your TrueNAS dataset paths — back these up
       - /mnt/tank/apps/baikal/config:/var/www/baikal/config
       - /mnt/tank/apps/baikal/Specific:/var/www/baikal/Specific
 
     healthcheck:
-      test: ["CMD", "nginx", "-t"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsS",
+          "-o",
+          "/dev/null",
+          "http://127.0.0.1/health.php",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3

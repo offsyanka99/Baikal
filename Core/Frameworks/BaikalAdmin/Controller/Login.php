@@ -42,13 +42,17 @@ class Login extends \Flake\Core\Controller {
 
         if (self::isSubmitted() && !\BaikalAdmin\Core\Auth::isAuthenticated()) {
             // Log failed accesses, for further processing by tools like Fail2Ban
-            $config = Yaml::parseFile(PROJECT_PATH_CONFIG . "baikal.yaml");
-            if (isset($config['system']["failed_access_message"]) && $config['system']["failed_access_message"] !== "") {
-                $log_msg = str_replace("%u", $sLogin, $config['system']["failed_access_message"]);
-                error_log($log_msg, 4);
+            try {
+                $config = Yaml::parseFile(PROJECT_PATH_CONFIG . "baikal.yaml");
+                if (isset($config['system']["failed_access_message"]) && $config['system']["failed_access_message"] !== "") {
+                    $log_msg = str_replace("%u", $sLogin, $config['system']["failed_access_message"]);
+                    error_log($log_msg, 4);
+                }
+            } catch (\Exception $e) {
+                error_log('Baikal admin auth failure (config unreadable)');
             }
             $sMessage = \Formal\Core\Message::error(
-                "The login/password you provided is invalid. Please retry.",
+                "The login/password you provided is invalid, or too many attempts were made. Please retry later.",
                 "Authentication error"
             );
         } elseif (self::justLoggedOut()) {

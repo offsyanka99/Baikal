@@ -6,32 +6,33 @@
     "homepage": "https://sabre.io/baikal/",
     "license" : "GPL-3.0-only",
     "require": {
-        "php"           : "^8.1",
+        "php"           : "^8.2",
         "sabre/dav"     : "~4.7.0",
-        "twig/twig"     : "~3.22.0",
-        "symfony/yaml"  : "~7.3.5",
-        "psr/log"       : "^1",
+        "twig/twig"     : "~3.27.1",
+        "symfony/yaml"  : "~7.4.8",
         "ext-dom"       : "*",
-        "ext-openssl"   : "*",
         "ext-pdo"       : "*",
         "ext-zlib"      : "*"
     },
     "require-dev" : {
         "friendsofphp/php-cs-fixer": "3.89.2",
-        "phpstan/phpstan": "~2.1.32"
+        "phpstan/phpstan": "2.1.53",
+        "phpstan/phpstan-deprecation-rules": "2.0.4"
     },
     "replace" : {
         "jeromeschneider/baikal" : "self.version"
     },
     "autoload": {
         "psr-0" : {
+            "BaikalAdmin"    : "Core/Frameworks/",
             "Baikal"         : "Core/Frameworks/",
             "Flake"          : "Core/Frameworks/",
             "Formal"         : "Core/Frameworks/"
         }
     },
     "support" : {
-        "source" : "https://github.com/sabre-io/Baikal"
+        "source" : "https://github.com/offsyanka99/Baikal",
+        "docs"   : "https://sabre.io/baikal/"
     },
     "scripts": {
         "cs-fixer": [

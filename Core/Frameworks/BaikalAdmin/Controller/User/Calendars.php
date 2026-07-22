@@ -142,7 +142,7 @@ class Calendars extends \Flake\Core\Controller {
 
         $this->oModel->set(
             "components",
-            "VEVENT"
+            \Baikal\Core\Tools::defaultCalendarComponents()
         );
 
         # Initialize corresponding form

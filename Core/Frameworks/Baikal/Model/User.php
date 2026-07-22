@@ -152,7 +152,7 @@ class User extends \Flake\Core\Model\Db {
                 "Default calendar"
             )->set(
                 "components",
-                "VEVENT,VTODO"
+                \Baikal\Core\Tools::defaultCalendarComponents()
             );
 
             $oDefaultCalendar->persist();
@@ -178,21 +178,50 @@ class User extends \Flake\Core\Model\Db {
     }
 
     function destroy() {
-        # TODO: delete all related resources (principals, calendars, calendar events, contact books and contacts)
+        $username = $this->get("username");
+        $principalUri = "principals/" . $username;
 
-        # Destroying identity principal
-        if ($this->oIdentityPrincipal != null) {
-            $this->oIdentityPrincipal->destroy();
-        }
-
+        # Calendars (events/todos/notes cascade via Calendar::destroy)
         $oCalendars = $this->getCalendarsBaseRequester()->execute();
         foreach ($oCalendars as $calendar) {
             $calendar->destroy();
         }
 
+        # Address books (contacts cascade via AddressBook::destroy)
         $oAddressBooks = $this->getAddressBooksBaseRequester()->execute();
         foreach ($oAddressBooks as $addressbook) {
             $addressbook->destroy();
+        }
+
+        # Scheduling inbox objects
+        if (isset($GLOBALS["DB"])) {
+            $GLOBALS["DB"]->exec_DELETEquery(
+                "schedulingobjects",
+                "principaluri=" . $GLOBALS["DB"]->fullQuote($principalUri, "schedulingobjects")
+            );
+            $GLOBALS["DB"]->exec_DELETEquery(
+                "calendarsubscriptions",
+                "principaluri=" . $GLOBALS["DB"]->fullQuote($principalUri, "calendarsubscriptions")
+            );
+            # WebDAV property storage under this principal
+            $GLOBALS["DB"]->exec_DELETEquery(
+                "propertystorage",
+                "path LIKE " . $GLOBALS["DB"]->fullQuote("calendars/" . $username . "%", "propertystorage")
+                . " OR path LIKE " . $GLOBALS["DB"]->fullQuote("addressbooks/" . $username . "%", "propertystorage")
+                . " OR path LIKE " . $GLOBALS["DB"]->fullQuote($principalUri . "%", "propertystorage")
+            );
+        }
+
+        # Principal membership + identity principal
+        if ($this->oIdentityPrincipal != null) {
+            $principalId = $this->oIdentityPrincipal->get("id");
+            if (isset($GLOBALS["DB"]) && $principalId) {
+                $GLOBALS["DB"]->exec_DELETEquery(
+                    "groupmembers",
+                    "principal_id=" . intval($principalId) . " OR member_id=" . intval($principalId)
+                );
+            }
+            $this->oIdentityPrincipal->destroy();
         }
 
         parent::destroy();
