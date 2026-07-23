@@ -1,10 +1,15 @@
-Baïkal (fork)
-=============
+Baïkal (fork) · 0.11.1-fork.1
+=============================
 
 [![continuous-integration](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml/badge.svg)](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml)
 [![docker](https://github.com/offsyanka99/Baikal/actions/workflows/docker.yml/badge.svg)](https://github.com/offsyanka99/Baikal/actions/workflows/docker.yml)
 
-Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server with:
+Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server based on upstream **0.11.1**, with packaging and UX for self-hosted / TrueNAS deployments.
+
+**This release:** `0.11.1-fork.1` (not an upstream sabre-io tag).  
+**Docs:** [docs/](docs/) · [Deployment](docs/DEPLOYMENT.md) · [TrueNAS compose](docs/truenas-scale.compose.yaml)
+
+Fork of Baïkal with:
 
 - **Docker** image and **TrueNAS SCALE** compose
 - **GHCR** multi-arch images: `ghcr.io/offsyanka99/baikal`
@@ -12,20 +17,31 @@ Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server with:
 - System settings for **Tasks (VTODO)** and **Notes (VJOURNAL)**
 - `/health.php` and `/info.php` for monitoring
 - CalDAV **calendar-timezone** dual-format fix (plain Olson id + VTIMEZONE) for Home Assistant expand queries
-- **User portal** (`/portal/`) — TypeScript SPA + PHP API to share calendars (bookmarks-sync style UI); `/dav.php/` kept as classic backup
+- **User portal** (`/portal/`) — TypeScript SPA + PHP API: create/edit calendars (name, color, description), share with other users; `/dav.php/` kept as classic backup
 
 Upstream project: [sabre-io/Baikal](https://github.com/sabre-io/Baikal).  
 Official docs: [sabre.io/baikal](https://sabre.io/baikal/).
+
+Versioning
+----------
+
+| Version | Meaning |
+|---------|---------|
+| `0.11.1` | Upstream Baikal line this fork is based on |
+| `0.11.1-fork.1` | This fork’s first packaged release (portal, HA timezone, Docker/TrueNAS) |
+
+Image tags: `latest`, `0.11.1-fork.1`, `sha-…`.
 
 Quick start (Docker)
 --------------------
 
 ```bash
-docker pull ghcr.io/offsyanka99/baikal:latest
+docker pull ghcr.io/offsyanka99/baikal:0.11.1-fork.1
+# or: ghcr.io/offsyanka99/baikal:latest
 docker run -d --name baikal -p 8080:80 \
   -v baikal-config:/var/www/baikal/config \
   -v baikal-data:/var/www/baikal/Specific \
-  ghcr.io/offsyanka99/baikal:latest
+  ghcr.io/offsyanka99/baikal:0.11.1-fork.1
 ```
 
 Then open http://127.0.0.1:8080/ and run the installer.
@@ -41,19 +57,20 @@ Endpoints
 
 | Path | Use |
 |------|-----|
-| `/portal/` | **User portal** — sign in as a DAV user, share calendars |
+| `/portal/` | **User portal** — calendars (name/color/description), sharing |
 | `/dav.php/` | CalDAV + CardDAV (clients + classic WebDAV browser) |
 | `/admin/` | Web admin |
 | `/api/` | Portal JSON API (session cookie) |
 | `/health.php` | Liveness JSON |
 | `/info.php` | Public status JSON |
 
-User portal (calendar sharing)
-------------------------------
+User portal
+-----------
 
 1. Admin creates DAV users under `/admin/`.
 2. Each user opens **`/portal/`**, signs in with **DAV** credentials.
-3. Select a calendar → pick another user → **Read only** or **Full access** → Share / Revoke.
+3. Create or edit calendars (display name, color, description).
+4. Share with another user → **Read only** or **Full access** → Revoke as needed.
 
 `/dav.php/` remains available as the original sabre browser (and for all CalDAV clients).
 
@@ -75,7 +92,19 @@ After `composer install` / `composer update`, vendor patches (including the
 calendar-timezone fix) are applied automatically via
 [`scripts/apply-vendor-patches.sh`](scripts/apply-vendor-patches.sh).
 
+Changelog (fork)
+----------------
+
+### 0.11.1-fork.1
+
+- User portal at `/portal/` (bookmarks-sync style UI) + `/api/` session API
+- Calendar create/edit: display name, color, description
+- Calendar sharing with other Baikal users (read / full access)
+- Dual-format `calendar-timezone` for Home Assistant expand queries
+- Docker multi-arch image (GHCR), TrueNAS SCALE compose, health/info endpoints
+- Admin hardening and Tasks/Notes system flags (carried from earlier fork work)
+
 Credits
 -------
 
-Baikal was created by [Jérôme Schneider](https://github.com/jeromeschneider) from Net Gusto and [fruux](https://fruux.com/) and is maintained by volunteers. This fork adds packaging, hardening, and Home Assistant–friendly CalDAV timezone handling for self-hosted / TrueNAS deployments.
+Baikal was created by [Jérôme Schneider](https://github.com/jeromeschneider) from Net Gusto and [fruux](https://fruux.com/) and is maintained by volunteers. This fork adds packaging, hardening, user portal, and Home Assistant–friendly CalDAV timezone handling for self-hosted / TrueNAS deployments.

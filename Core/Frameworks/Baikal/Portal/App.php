@@ -107,6 +107,23 @@ class App {
             return ['calendars' => $this->shares->listCalendars($username)];
         }
 
+        // POST /calendars — create
+        if ($method === 'POST' && $path === '/calendars') {
+            $body = $this->jsonBody();
+            $cal = $this->shares->createCalendar($username, $body);
+
+            return ['calendar' => $cal];
+        }
+
+        // PATCH|PUT /calendars/{id} — update displayname / color / description
+        if (preg_match('#^/calendars/(\d+)$#', $path, $m) && ($method === 'PATCH' || $method === 'PUT')) {
+            $instanceId = (int) $m[1];
+            $body = $this->jsonBody();
+            $cal = $this->shares->updateCalendar($username, $instanceId, $body);
+
+            return ['calendar' => $cal];
+        }
+
         if (preg_match('#^/calendars/(\d+)/shares$#', $path, $m)) {
             $instanceId = (int) $m[1];
             if ($method === 'GET') {

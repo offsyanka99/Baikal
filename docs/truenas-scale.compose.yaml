@@ -1,4 +1,5 @@
 # Baïkal — TrueNAS SCALE custom app (GHCR image from offsyanka99/Baikal)
+# Release: 0.11.1-fork.1  ·  docs: https://github.com/offsyanka99/Baikal/tree/master/docs
 #
 # Use: Apps → Discover apps → Custom App / Install via YAML
 #      (Electric Eel / 24.10+ Docker-based SCALE)
@@ -22,10 +23,11 @@
 # 5. Health: http://NAS-IP:31088/health.php
 # 6. Info:   http://NAS-IP:31088/info.php
 #
-# Share calendars (user-friendly):
+# Portal (user-friendly):
 #   1. Admin creates user1 + user2 under /admin/
 #   2. user1 opens /portal/ , signs in with DAV password
-#   3. Select calendar → pick user2 → Read only or Full access → Share
+#   3. Add/edit calendars (name, color, description)
+#   4. Share → pick user2 → Read only or Full access
 #   Classic backup UI: /dav.php/ → calendar → Actions → mailto:…
 #
 # Home Assistant CalDAV:
@@ -47,15 +49,16 @@
 #   BAIKAL_LOCK_INSTALL=1     — refuse /admin/install after deploy
 #   BAIKAL_ALLOW_REINSTALL=1  — re-open installer intentionally
 #
-# Docs: docs/DEPLOYMENT.md · https://sabre.io/baikal/
+# Docs: https://github.com/offsyanka99/Baikal/tree/master/docs
+#       docs/DEPLOYMENT.md · upstream https://sabre.io/baikal/
 
 services:
   baikal:
-    # --- Preferred: pre-built image (CI pushes on master / tags) -----------
-    image: ghcr.io/offsyanka99/baikal:latest
-    # Pin for production, e.g.:
+    # --- Preferred: pin this fork release ---------------------------------
+    image: ghcr.io/offsyanka99/baikal:0.11.1-fork.1
+    # Or track master builds:
+    # image: ghcr.io/offsyanka99/baikal:latest
     # image: ghcr.io/offsyanka99/baikal:sha-<git-sha>
-    # image: ghcr.io/offsyanka99/baikal:0.11.1
 
     # --- Alternative: build from this fork on the NAS ---------------------
     # build:

@@ -1,7 +1,10 @@
 # Baïkal user portal
 
-TypeScript SPA for calendar sharing. Styled like the bookmarks-sync admin UI
-(dark surface cards, sticky topnav, primary blue actions).
+**Version:** `0.11.1-fork.1`
+
+TypeScript SPA for calendar create/edit and sharing. Styled like the bookmarks-sync
+admin UI (dark surface cards, sticky topnav, primary blue actions, footer pinned
+to the viewport bottom).
 
 ## Develop
 
@@ -28,9 +31,12 @@ Docker image runs this build in a multi-stage `node` stage automatically.
 | POST | `/api/logout` | session |
 | GET | `/api/me` | session |
 | GET | `/api/calendars` | session |
+| POST | `/api/calendars` | session body `{displayname, description?, color?}` |
+| PATCH | `/api/calendars/{instanceId}` | session body `{displayname?, description?, color?}` |
 | GET | `/api/directory` | session |
 | GET | `/api/calendars/{instanceId}/shares` | session |
 | POST | `/api/calendars/{instanceId}/shares` | session body `{username, access}` |
 | DELETE | `/api/calendars/{instanceId}/shares` | session body `{href}` |
 
-`access`: `read` | `readwrite`.
+`access`: `read` | `readwrite`.  
+`color`: `#RGB`, `#RRGGBB`, or `#RRGGBBAA` (empty clears).

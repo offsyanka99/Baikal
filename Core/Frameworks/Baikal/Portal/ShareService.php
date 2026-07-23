@@ -3,7 +3,9 @@
 namespace Baikal\Portal;
 
 use Sabre\CalDAV\Backend\PDO as CaldavBackend;
+use Sabre\DAV\PropPatch;
 use Sabre\DAV\Sharing\Plugin as SharingPlugin;
+use Sabre\DAV\UUIDUtil;
 use Sabre\DAV\Xml\Element\Sharee;
 
 /**
@@ -58,6 +60,107 @@ class ShareService {
         });
 
         return $out;
+    }
+
+    /**
+     * Create a calendar owned by the user.
+     *
+     * @param array{displayname?: string, description?: string, color?: string} $fields
+     *
+     * @return array<string, mixed>
+     */
+    public function createCalendar(string $username, array $fields): array {
+        $displayname = trim((string) ($fields['displayname'] ?? ''));
+        if ($displayname === '') {
+            throw new ApiException('Display name is required', 400);
+        }
+        $description = trim((string) ($fields['description'] ?? ''));
+        $color = $this->normalizeColor(isset($fields['color']) ? (string) $fields['color'] : '');
+
+        $uri = $this->uniqueCalendarUri($username, $displayname);
+        $properties = [
+            '{DAV:}displayname' => $displayname,
+            '{urn:ietf:params:xml:ns:caldav}calendar-description' => $description,
+        ];
+        if ($color !== '') {
+            $properties['{http://apple.com/ns/ical/}calendar-color'] = $color;
+        }
+
+        $ids = $this->backend->createCalendar('principals/' . $username, $uri, $properties);
+        $instanceId = is_array($ids) ? (int) $ids[1] : 0;
+
+        foreach ($this->listCalendars($username) as $cal) {
+            if ((int) $cal['id'] === $instanceId) {
+                return $cal;
+            }
+        }
+
+        return [
+            'id'          => $instanceId,
+            'calendarId'  => is_array($ids) ? (int) $ids[0] : 0,
+            'instanceId'  => $instanceId,
+            'uri'         => $uri,
+            'displayname' => $displayname,
+            'description' => $description,
+            'color'       => $color,
+            'access'      => 'owner',
+            'accessCode'  => SharingPlugin::ACCESS_SHAREDOWNER,
+            'canShare'    => true,
+            'components'  => 'VEVENT,VTODO',
+        ];
+    }
+
+    /**
+     * Update display name, description, and/or color on an owned calendar.
+     *
+     * @param array{displayname?: string, description?: string, color?: string} $fields
+     *
+     * @return array<string, mixed>
+     */
+    public function updateCalendar(string $username, int $instanceId, array $fields): array {
+        $calId = $this->requireOwnedCalendarId($username, $instanceId);
+        $mutations = [];
+
+        if (array_key_exists('displayname', $fields)) {
+            $name = trim((string) $fields['displayname']);
+            if ($name === '') {
+                throw new ApiException('Display name cannot be empty', 400);
+            }
+            if (mb_strlen($name) > 200) {
+                throw new ApiException('Display name is too long (max 200)', 400);
+            }
+            $mutations['{DAV:}displayname'] = $name;
+        }
+
+        if (array_key_exists('description', $fields)) {
+            $desc = trim((string) $fields['description']);
+            if (mb_strlen($desc) > 2000) {
+                throw new ApiException('Description is too long (max 2000)', 400);
+            }
+            $mutations['{urn:ietf:params:xml:ns:caldav}calendar-description'] = $desc;
+        }
+
+        if (array_key_exists('color', $fields)) {
+            $mutations['{http://apple.com/ns/ical/}calendar-color'] = $this->normalizeColor((string) $fields['color']);
+        }
+
+        if ($mutations === []) {
+            throw new ApiException('No fields to update (displayname, description, color)', 400);
+        }
+
+        $propPatch = new PropPatch($mutations);
+        $this->backend->updateCalendar($calId, $propPatch);
+        if (!$propPatch->commit()) {
+            throw new ApiException('Failed to update calendar properties', 500);
+        }
+
+        foreach ($this->listCalendars($username) as $cal) {
+            if ((int) $cal['id'] === $instanceId) {
+                return $cal;
+            }
+        }
+
+        throw new ApiException('Calendar updated but could not be reloaded', 500);
     }
 
     /**
@@ -261,5 +364,55 @@ class ShareService {
         }
 
         return $principal;
+    }
+
+    /**
+     * Normalize Apple-style calendar color (#RGB / #RRGGBB / #RRGGBBAA) or empty to clear.
+     */
+    private function normalizeColor(string $color): string {
+        $color = trim($color);
+        if ($color === '') {
+            return '';
+        }
+        if ($color[0] !== '#') {
+            $color = '#' . $color;
+        }
+        if (!preg_match('/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/', $color)) {
+            throw new ApiException('Color must be #RGB, #RRGGBB, or #RRGGBBAA', 400);
+        }
+
+        // Expand #RGB → #RRGGBB for clients
+        if (strlen($color) === 4) {
+            $color = '#' . $color[1] . $color[1] . $color[2] . $color[2] . $color[3] . $color[3];
+        }
+
+        return strtoupper($color);
+    }
+
+    private function uniqueCalendarUri(string $username, string $displayname): string {
+        $base = strtolower($displayname);
+        $base = preg_replace('/[^a-z0-9]+/', '-', $base) ?? 'calendar';
+        $base = trim($base, '-');
+        if ($base === '') {
+            $base = 'calendar';
+        }
+        $base = substr($base, 0, 40);
+        $uri = $base;
+        $principal = 'principals/' . $username;
+        $stmt = $this->pdo->prepare(
+            'SELECT 1 FROM calendarinstances WHERE principaluri = ? AND uri = ? LIMIT 1'
+        );
+        $n = 0;
+        while (true) {
+            $stmt->execute([$principal, $uri]);
+            if (!$stmt->fetchColumn()) {
+                return $uri;
+            }
+            ++$n;
+            $uri = $base . '-' . ($n > 3 ? UUIDUtil::getUUID() : (string) $n);
+            if ($n > 20) {
+                return $base . '-' . UUIDUtil::getUUID();
+            }
+        }
     }
 }

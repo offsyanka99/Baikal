@@ -91,6 +91,23 @@ export const api = {
     }),
   logout: () => request<{ ok: boolean }>("/logout", { method: "POST" }),
   calendars: () => request<{ calendars: Calendar[] }>("/calendars"),
+  createCalendar: (body: {
+    displayname: string;
+    description?: string;
+    color?: string;
+  }) =>
+    request<{ calendar: Calendar }>("/calendars", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateCalendar: (
+    instanceId: number,
+    body: { displayname?: string; description?: string; color?: string },
+  ) =>
+    request<{ calendar: Calendar }>(`/calendars/${instanceId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   directory: () => request<{ users: DirectoryUser[] }>("/directory"),
   shares: (instanceId: number) =>
     request<{ shares: Share[] }>(`/calendars/${instanceId}/shares`),

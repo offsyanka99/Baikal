@@ -14,7 +14,7 @@ ini_set('session.cookie_httponly', '1');
 header('X-Content-Type-Options: nosniff');
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
-    header('Allow: GET, POST, DELETE, OPTIONS');
+    header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS');
     http_response_code(204);
     exit;
 }
