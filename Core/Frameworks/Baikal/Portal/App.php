@@ -43,11 +43,12 @@ class App {
     }
 
     /**
-     * Portal UI prefs (time format / week start). Env overrides YAML.
+     * Portal UI prefs (time format / week start / log level). Env overrides YAML.
      * TIME_FORMAT / BAIKAL_PORTAL_TIME_FORMAT: auto|12h|24h
-     * BAIKAL_PORTAL_WEEK_START: auto|monday|sunday.
+     * BAIKAL_PORTAL_WEEK_START: auto|monday|sunday
+     * PORTAL_LOG_LEVEL / BAIKAL_PORTAL_LOG_LEVEL: off|error|warn|info|debug.
      *
-     * @return array{timeFormat: string, weekStart: string}
+     * @return array{timeFormat: string, weekStart: string, logLevel: string}
      */
     private function portalUiSettings(): array {
         $sys = is_array($this->config['system'] ?? null) ? $this->config['system'] : [];
@@ -70,7 +71,42 @@ class App {
         return [
             'timeFormat' => $time,
             'weekStart'  => $week,
+            'logLevel'   => $this->portalLogLevel(),
         ];
+    }
+
+    /**
+     * Portal log level (SPA console + optional server request log). Env overrides YAML.
+     * PORTAL_LOG_LEVEL / BAIKAL_PORTAL_LOG_LEVEL / system.portal_log_level: off|error|warn|info|debug.
+     */
+    private function portalLogLevel(): string {
+        $sys = is_array($this->config['system'] ?? null) ? $this->config['system'] : [];
+        $level = strtolower(trim((string) (
+            getenv('PORTAL_LOG_LEVEL')
+            ?: getenv('BAIKAL_PORTAL_LOG_LEVEL')
+            ?: ($sys['portal_log_level'] ?? 'off')
+        )));
+        if (!in_array($level, ['off', 'error', 'warn', 'info', 'debug'], true)) {
+            return 'off';
+        }
+
+        return $level;
+    }
+
+    /** Whether server-side portal request logging is enabled for this level. */
+    private function portalServerLogEnabled(string $min = 'info'): bool {
+        $order = ['off' => 0, 'error' => 1, 'warn' => 2, 'info' => 3, 'debug' => 4];
+        $cur = $order[$this->portalLogLevel()] ?? 0;
+        $need = $order[$min] ?? 3;
+
+        return $cur >= $need;
+    }
+
+    private function portalServerLog(string $message, string $min = 'info'): void {
+        if (!$this->portalServerLogEnabled($min)) {
+            return;
+        }
+        error_log('Baikal portal: ' . $message);
     }
 
     /**
@@ -109,12 +145,19 @@ class App {
             $path = '';
         }
 
+        $t0 = microtime(true);
+        $this->portalServerLog($method . ' ' . $path, 'debug');
+
         try {
             // Binary/download responses (ICS / VCF export)
             if ($method === 'GET' && preg_match('#^/calendars/(\d+)/export$#', $path, $m)) {
                 $username = $this->auth->requireUser();
                 $export = $this->shares->exportCalendar($username, (int) $m[1]);
                 $this->fileDownload($export['ics'], $export['filename'], 'text/calendar; charset=utf-8');
+                $this->portalServerLog(
+                    sprintf('%s %s → 200 export (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                    'info'
+                );
 
                 return;
             }
@@ -122,6 +165,10 @@ class App {
                 $username = $this->auth->requireUser();
                 $export = $this->contacts->exportAddressBook($username, (int) $m[1]);
                 $this->fileDownload($export['vcf'], $export['filename'], 'text/vcard; charset=utf-8');
+                $this->portalServerLog(
+                    sprintf('%s %s → 200 export (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                    'info'
+                );
 
                 return;
             }
@@ -130,6 +177,10 @@ class App {
                 $username = $this->auth->requireUser();
                 $export = $this->contacts->exportContact($username, (int) $m[1], rawurldecode($m[2]));
                 $this->fileDownload($export['vcf'], $export['filename'], 'text/vcard; charset=utf-8');
+                $this->portalServerLog(
+                    sprintf('%s %s → 200 export (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                    'info'
+                );
 
                 return;
             }
@@ -146,13 +197,32 @@ class App {
                 header('X-Content-Type-Options: nosniff');
                 header('Content-Length: ' . (string) strlen($photo['bytes']));
                 echo $photo['bytes'];
+                $this->portalServerLog(
+                    sprintf('%s %s → 200 photo (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                    'info'
+                );
 
                 return;
             }
 
             $result = $this->dispatch($method, $path);
             $this->json(200, $result);
+            $this->portalServerLog(
+                sprintf('%s %s → 200 (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                'info'
+            );
         } catch (ApiException $e) {
+            $this->portalServerLog(
+                sprintf(
+                    '%s %s → %d %s (%dms)',
+                    $method,
+                    $path,
+                    $e->getStatus(),
+                    $e->getMessage(),
+                    (int) ((microtime(true) - $t0) * 1000)
+                ),
+                $e->getStatus() >= 500 ? 'error' : 'warn'
+            );
             $this->json($e->getStatus(), ['error' => $e->getMessage()]);
         } catch (\Throwable $e) {
             error_log('Baikal portal API: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
@@ -169,6 +239,11 @@ class App {
      * @return array<string, mixed>|list<mixed>
      */
     private function dispatch(string $method, string $path) {
+        // Public portal UI prefs (no auth) — SPA applies log level before login
+        if ($method === 'GET' && $path === '/ui') {
+            return ['ui' => $this->portalUiSettings()];
+        }
+
         if ($method === 'POST' && $path === '/login') {
             $this->assertSameOrigin();
             $body = $this->jsonBody();
@@ -176,8 +251,12 @@ class App {
                 (string) ($body['username'] ?? ''),
                 (string) ($body['password'] ?? '')
             );
+            $this->portalServerLog('login ok user=' . (string) ($user['username'] ?? ''), 'info');
 
-            return ['user' => $user];
+            return [
+                'user' => $user,
+                'ui'   => $this->portalUiSettings(),
+            ];
         }
 
         // State-changing requests: same-origin + CSRF (when a session exists)
@@ -189,6 +268,7 @@ class App {
                     $this->auth->assertCsrf($this->csrfFromRequest());
                 }
                 $this->auth->logout();
+                $this->portalServerLog('logout', 'info');
 
                 return ['ok' => true];
             }

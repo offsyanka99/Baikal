@@ -18,6 +18,9 @@ system:
     #   BAIKAL_PORTAL_WEEK_START = auto|monday|sunday
     portal_time_format: 'auto'
     portal_week_start: 'auto'
+    # Portal debug logging (browser console + Docker/PHP error_log). Env:
+    #   PORTAL_LOG_LEVEL / BAIKAL_PORTAL_LOG_LEVEL = off|error|warn|info|debug
+    portal_log_level: 'off'
 database:
     encryption_key: 5d3f0fa0192e3058ea70f1bb20924add
     backend: 'mysql'

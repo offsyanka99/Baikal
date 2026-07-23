@@ -91,12 +91,19 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 - Optional portal locale helpers in `baikal.yaml` / env (override browser auto-detect):
   - `system.portal_time_format` or `TIME_FORMAT` / `BAIKAL_PORTAL_TIME_FORMAT`: `auto` | `12h` | `24h`
   - `system.portal_week_start` or `BAIKAL_PORTAL_WEEK_START`: `auto` | `monday` | `sunday`
+- Portal debug logging (`off` by default; enable while troubleshooting):
+  - `system.portal_log_level` or `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL`: `off` | `error` | `warn` | `info` | `debug`
+  - **Browser:** open DevTools → Console; messages are prefixed `[baikal-portal]`
+  - **Server:** same level writes request/outcome lines to PHP `error_log` (Docker: `docker logs baikal`)
+  - Public `GET /api/ui` returns prefs (including log level) without a session
 
 ### API (summary)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/login` | DAV user session |
+| GET | `/api/ui` | Public portal prefs (`timeFormat`, `weekStart`, `logLevel`) |
+| POST | `/api/login` | DAV user session (+ `ui` prefs) |
+| GET | `/api/me` | Session profile + `ui` prefs |
 | GET | `/api/calendars` | List calendars |
 | POST | `/api/calendars` | Create (`displayname`, `color?`, `description?`, `holidays?`, `holidayCountry?`, `readOnly?`) |
 | PATCH | `/api/calendars/{id}` | Update name / color / description |
@@ -182,6 +189,22 @@ There is no separate “TasksDAV” / “NotesDAV”: tasks are **VTODO**, notes
 | Admin session timeout | Idle minutes for admin cookie session |
 | WebDAV auth type | Digest / Basic / Apache |
 
+## Environment variables (Docker / compose)
+
+| Env | Values / default | Effect |
+|-----|------------------|--------|
+| `TZ` | e.g. `America/Toronto` | Container timezone (logs, PHP defaults) |
+| `BAIKAL_LOCK_INSTALL` | `1` | Force installer lock even if `INSTALL_DISABLED` is missing |
+| `BAIKAL_ALLOW_REINSTALL` | `1` | Allow re-opening the installer when lock env is set |
+| `BAIKAL_SKIP_CHOWN` | `1` | Skip entrypoint chown of mounted volumes |
+| `TIME_FORMAT` / `BAIKAL_PORTAL_TIME_FORMAT` | `auto` (default), `12h`, `24h` | Portal time display |
+| `BAIKAL_PORTAL_WEEK_START` | `auto` (default), `monday`, `sunday` | Portal calendar week start |
+| `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL` | `off` (default), `error`, `warn`, `info`, `debug` | Portal debug logs (browser console + PHP `error_log`) |
+
+YAML equivalents under `system.*` in `baikal.yaml`: `portal_time_format`, `portal_week_start`, `portal_log_level`. **Env overrides YAML.**
+
+Leave `PORTAL_LOG_LEVEL` at `off` in production; use `debug` only while troubleshooting (verbose UI/API lines; no passwords).
+
 ## Installer lock
 
 After a normal install, `Specific/INSTALL_DISABLED` is created and `/admin/install/` returns **403**.
@@ -229,6 +252,7 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasi
 - Single-contact `.vcf` export; address-book delete confirmation modal; contact birthday / special date
 - Tasks bulk-bar UX (green apply icons; Delete / Clear selection on second row); Calendar details: Share before Import/export
 - Portal time format / week start prefs (`portal_time_format`, `portal_week_start` or env overrides)
+- Portal debug log level (`portal_log_level` / `PORTAL_LOG_LEVEL`: off|error|warn|info|debug)
 
 ### 0.11.1-fork.3
 

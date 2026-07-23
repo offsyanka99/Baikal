@@ -1,3 +1,5 @@
+import { log } from "./log";
+
 export type PortalUser = {
   username: string;
   displayname: string;
@@ -266,6 +268,12 @@ export function getCsrfToken(): string {
   return csrfToken;
 }
 
+export type PortalUi = {
+  timeFormat?: string;
+  weekStart?: string;
+  logLevel?: string;
+};
+
 async function request<T>(
   path: string,
   init: RequestInit = {},
@@ -278,6 +286,9 @@ async function request<T>(
   if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS" && csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
+  const t0 =
+    typeof performance !== "undefined" ? performance.now() : Date.now();
+  log.debug(`api → ${method} ${path}`);
   const res = await fetch(`/api${path}`, {
     ...init,
     headers,
@@ -292,6 +303,9 @@ async function request<T>(
       data = { error: text };
     }
   }
+  const ms = Math.round(
+    (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+  );
   if (!res.ok) {
     let msg = `Request failed (${res.status})`;
     if (
@@ -306,8 +320,16 @@ async function request<T>(
       msg =
         "Server error during import (often a timeout on large calendars). Try again — already imported events update faster.";
     }
+    if (res.status >= 500) {
+      log.error(`api ← ${method} ${path} ${res.status} (${ms}ms)`, msg);
+    } else if (res.status !== 401) {
+      log.warn(`api ← ${method} ${path} ${res.status} (${ms}ms)`, msg);
+    } else {
+      log.debug(`api ← ${method} ${path} 401 (${ms}ms)`);
+    }
     throw new ApiError(msg, res.status);
   }
+  log.info(`api ← ${method} ${path} ${res.status} (${ms}ms)`);
   return data as T;
 }
 
@@ -316,19 +338,21 @@ function encUri(uri: string): string {
 }
 
 export const api = {
+  /** Public portal prefs (no session). Used early to apply log level before login. */
+  ui: () => request<{ ui: PortalUi }>("/ui"),
   me: async () => {
     const data = await request<{
       user: PortalUser;
       csrfToken?: string;
       version: string | null;
       davPath: string;
-      ui?: { timeFormat?: string; weekStart?: string };
+      ui?: PortalUi;
     }>("/me");
     setCsrfToken(data.csrfToken || data.user?.csrfToken);
     return data;
   },
   login: async (username: string, password: string) => {
-    const data = await request<{ user: PortalUser }>("/login", {
+    const data = await request<{ user: PortalUser; ui?: PortalUi }>("/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });

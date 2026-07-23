@@ -49,6 +49,9 @@
 # Optional env:
 #   BAIKAL_LOCK_INSTALL=1     — refuse /admin/install after deploy
 #   BAIKAL_ALLOW_REINSTALL=1  — re-open installer intentionally
+#   PORTAL_LOG_LEVEL=debug    — portal console + PHP request logs (off|error|warn|info|debug)
+#   TIME_FORMAT=24h           — portal time display (auto|12h|24h)
+#   BAIKAL_PORTAL_WEEK_START=monday
 #
 # Docs: https://github.com/offsyanka99/Baikal/tree/master/docs
 #       docs/DEPLOYMENT.md · upstream https://sabre.io/baikal/
@@ -84,6 +87,10 @@ services:
 
     environment:
       TZ: "America/Toronto"
+      TIME_FORMAT: "24h"                 # or 12h
+      BAIKAL_PORTAL_WEEK_START: "monday" # or sunday
+      # Portal debug (browser DevTools + container logs). Default off.
+      # PORTAL_LOG_LEVEL: "debug"        # off|error|warn|info|debug
       # After first successful install, recommended for internet-facing hosts:
       # BAIKAL_LOCK_INSTALL: "1"
       # BAIKAL_SKIP_CHOWN: "1"

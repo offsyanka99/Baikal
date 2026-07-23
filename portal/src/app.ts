@@ -14,10 +14,12 @@ import {
   type ImportResult,
   type ItemCalendarOption,
   type NoteItem,
+  type PortalUi,
   type PortalUser,
   type Share,
   type TaskItem,
 } from "./api";
+import { log, setLogLevel } from "./log";
 
 type TabId = "calendars" | "contacts" | "tasks" | "notes";
 
@@ -245,12 +247,29 @@ export function mountApp(root: HTMLElement): void {
   let lastImportResult: { ok: boolean; message: string } | null = null;
   let lastContactImportResult: { ok: boolean; message: string } | null = null;
   let escapeBound = false;
-  /** From /me + baikal.yaml / env (TIME_FORMAT, BAIKAL_PORTAL_WEEK_START) */
-  let portalUi: { timeFormat: "auto" | "12h" | "24h"; weekStart: "auto" | "monday" | "sunday" } = {
+  /** From /ui|/me + baikal.yaml / env (TIME_FORMAT, week start, log level) */
+  let portalUi: {
+    timeFormat: "auto" | "12h" | "24h";
+    weekStart: "auto" | "monday" | "sunday";
+    logLevel: string;
+  } = {
     timeFormat: "auto",
     weekStart: "auto",
+    logLevel: "off",
   };
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function applyPortalUi(ui: PortalUi | null | undefined): void {
+    if (!ui) return;
+    const tf = (ui.timeFormat || "auto").toLowerCase();
+    const ws = (ui.weekStart || "auto").toLowerCase();
+    portalUi = {
+      timeFormat: tf === "12h" || tf === "24h" ? tf : "auto",
+      weekStart: ws === "monday" || ws === "sunday" ? ws : "auto",
+      logLevel: ui.logLevel || "off",
+    };
+    setLogLevel(portalUi.logLevel);
+  }
 
   // Tasks / Notes (CalDAV VTODO / VJOURNAL)
   let tasks: TaskItem[] = [];
@@ -281,20 +300,26 @@ export function mountApp(root: HTMLElement): void {
   }
 
   async function bootstrap() {
+    log.event("bootstrap.start");
+    // Public prefs first so log level works on the login screen
+    try {
+      const pub = await api.ui();
+      applyPortalUi(pub.ui);
+    } catch (e) {
+      log.debug("bootstrap: /api/ui failed", e instanceof Error ? e.message : e);
+    }
     try {
       const me = await api.me();
       user = me.user;
-      const tf = (me.ui?.timeFormat || "auto").toLowerCase();
-      const ws = (me.ui?.weekStart || "auto").toLowerCase();
-      portalUi = {
-        timeFormat: tf === "12h" || tf === "24h" ? tf : "auto",
-        weekStart: ws === "monday" || ws === "sunday" ? ws : "auto",
-      };
+      applyPortalUi(me.ui);
+      log.event("bootstrap.session", { username: user?.username ?? null });
       await loadHome();
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         user = null;
+        log.event("bootstrap.anonymous");
       } else {
+        log.error("bootstrap failed", e instanceof Error ? e.message : e);
         setFlash("error", e instanceof Error ? e.message : "Failed to load");
       }
     }
@@ -302,6 +327,7 @@ export function mountApp(root: HTMLElement): void {
   }
 
   async function loadHome() {
+    log.debug("loadHome");
     const [cals, dir, abs] = await Promise.all([
       api.calendars(),
       api.directory().catch(() => ({ users: [] as DirectoryUser[] })),
@@ -310,6 +336,11 @@ export function mountApp(root: HTMLElement): void {
     calendars = cals.calendars;
     directory = dir.users;
     addressBooks = abs.addressbooks;
+    log.event("loadHome", {
+      calendars: calendars.length,
+      addressBooks: addressBooks.length,
+      directory: directory.length,
+    });
     if (holidayCountries.length === 0) {
       try {
         const hc = await api.holidayCountries();
@@ -485,11 +516,22 @@ export function mountApp(root: HTMLElement): void {
     }
     const { from, to } = monthRange(monthCursor.y, monthCursor.m);
     monthEventsLoading = true;
+    log.debug("loadMonthEvents", { selectedId, from, to });
     try {
       const res = await api.calendarEvents(selectedId, from, to);
       monthEvents = res.events;
-    } catch {
+      log.event("monthEvents.loaded", {
+        calendarId: selectedId,
+        count: monthEvents.length,
+        from,
+        to,
+      });
+    } catch (e) {
       monthEvents = [];
+      log.warn(
+        "loadMonthEvents failed",
+        e instanceof Error ? e.message : e,
+      );
     } finally {
       monthEventsLoading = false;
     }
@@ -3327,12 +3369,16 @@ export function mountApp(root: HTMLElement): void {
     busy = true;
     clearFlash();
     render();
+    log.event("login.attempt", { username });
     try {
       const res = await api.login(username, password);
       user = res.user;
+      applyPortalUi(res.ui);
+      log.event("login.ok", { username: user?.username ?? username });
       await loadHome();
       setFlash("success", "Signed in");
     } catch (e) {
+      log.warn("login.failed", e instanceof Error ? e.message : e);
       setFlash("error", e instanceof Error ? e.message : "Login failed");
     } finally {
       busy = false;
@@ -3457,6 +3503,12 @@ export function mountApp(root: HTMLElement): void {
     clearFlash();
     eventModalOpen = true;
     render();
+    log.event(isCreate ? "event.create" : "event.update", {
+      instanceId: targetInstanceId,
+      uri: isCreate ? null : uri,
+      allDay,
+      summary,
+    });
     try {
       const body = {
         summary,
@@ -3480,9 +3532,14 @@ export function mountApp(root: HTMLElement): void {
       editingEvent = null;
       creatingEvent = false;
       eventDtPicker = null;
+      log.event(isCreate ? "event.created" : "event.saved", {
+        uri: res.event.uri,
+        instanceId: res.event.instanceId,
+      });
       setFlash("success", isCreate ? "Event created" : "Event saved");
     } catch (e) {
       // Keep modal open so the user can fix errors
+      log.warn("event.save failed", e instanceof Error ? e.message : e);
       setFlash("error", e instanceof Error ? e.message : "Save failed");
     } finally {
       busy = false;
@@ -3582,8 +3639,16 @@ export function mountApp(root: HTMLElement): void {
     const t = (ev.target as HTMLElement).closest<HTMLElement>("[data-action]");
     if (!t) return;
     const action = t.dataset.action;
+    if (action) {
+      log.debug(`action:${action}`, {
+        id: t.dataset.id,
+        tab: t.dataset.tab,
+        uri: t.dataset.uri,
+      });
+    }
     if (action === "logout") {
       busy = true;
+      log.event("logout");
       try {
         await api.logout();
       } catch {
@@ -4050,6 +4115,7 @@ export function mountApp(root: HTMLElement): void {
       const tab = t.dataset.tab as TabId | undefined;
       if (tab === "calendars" || tab === "contacts" || tab === "tasks" || tab === "notes") {
         activeTab = tab;
+        log.event("tab", { tab });
         if (tab !== "calendars") {
           calModalOpen = false;
           deleteConfirmId = null;
@@ -4071,6 +4137,7 @@ export function mountApp(root: HTMLElement): void {
             await loadNotes();
           }
         } catch (e) {
+          log.warn("tab load failed", e instanceof Error ? e.message : e);
           setFlash("error", e instanceof Error ? e.message : "Failed to load");
         } finally {
           busy = false;

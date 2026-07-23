@@ -15,7 +15,19 @@ to the viewport bottom).
 | **Tasks** | CalDAV `VTODO` list (sortable), subtasks via `RELATED-TO;RELTYPE=PARENT`, multi-select bulk status/due/%, create/edit/delete on writable calendars |
 | **Notes** | CalDAV `VJOURNAL` list (sortable), create/edit/delete on writable calendars |
 
-Section help lives under **(i)** info modals. Optional time format / week start from `/api/me` (`ui`).
+Section help lives under **(i)** info modals. Optional time format / week start / log level from `/api/ui` or `/api/me` (`ui`).
+
+### Debug logging
+
+Set log level in `baikal.yaml` or env (env wins):
+
+| Source | Key | Values |
+|--------|-----|--------|
+| YAML | `system.portal_log_level` | `off` (default), `error`, `warn`, `info`, `debug` |
+| Env | `PORTAL_LOG_LEVEL` or `BAIKAL_PORTAL_LOG_LEVEL` | same |
+
+- **Browser:** DevTools → Console (`[baikal-portal]` prefix). `info` = API timings + UI events; `debug` = outbound requests + raw actions.
+- **Server:** PHP `error_log` for the same level (request lines).
 
 ## Develop
 
@@ -38,6 +50,7 @@ Docker image runs this build in a multi-stage `node` stage automatically.
 
 | Method | Path | Auth |
 |--------|------|------|
+| GET | `/api/ui` | — (public portal prefs: time format, week start, log level) |
 | POST | `/api/login` | — |
 | POST | `/api/logout` | session |
 | GET | `/api/me` | session |

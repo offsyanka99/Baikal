@@ -21,7 +21,7 @@ Fork of Baïkal with:
   - **Calendar** tab: owned list (Edit / Delete), month event grid, create/edit/delete events (incl. RRULE), holidays/read-only, details/share/import/export in modal
   - **Contacts** tab: address books (CRUD + delete confirm), contact list/search/edit, multi email/phone, photos, birthday/special dates, per-contact and book `.vcf` export
   - **Tasks** / **Notes** tabs: CalDAV `VTODO` / `VJOURNAL` (bulk actions on tasks)
-  - Info **(i)** modals instead of long inline help; optional 12h/24h and week-start prefs
+  - Info **(i)** modals instead of long inline help; optional 12h/24h, week-start, and debug log level prefs
 - `/dav.php/` kept as classic backup browser and CalDAV/CardDAV endpoint
 
 Upstream project: [sabre-io/Baikal](https://github.com/sabre-io/Baikal).  
@@ -36,7 +36,7 @@ Versioning
 | `0.11.1-fork.1` | First packaged release (portal v1, HA timezone, Docker/TrueNAS) |
 | `0.11.1-fork.2` | Portal calendars/contacts polish: import/export, holidays, tabs, UI |
 | `0.11.1-fork.3` | Full portal contacts CRUD, CalDAV read-only plugin, portal security hardening |
-| `0.11.1-fork.4` | Portal event CRUD/RRULE, single-contact export, bulk-bar UX, portal UI prefs |
+| `0.11.1-fork.4` | Portal event CRUD/RRULE, single-contact export, bulk-bar UX, portal UI prefs + debug logging |
 
 Image tags: `latest`, `0.11.1-fork.4`, `sha-…`.
 
@@ -120,6 +120,7 @@ Changelog (fork)
 - Contact **birthday** and **special date** fields; Calendar details modal order: Share then Import/export
 - Tasks bulk bar: green apply icons, Delete / Clear selection on a second row
 - Portal UI prefs: `portal_time_format` / `portal_week_start` in `baikal.yaml` (or `TIME_FORMAT` / `BAIKAL_PORTAL_*` env)
+- Portal debug logging: `portal_log_level` / `PORTAL_LOG_LEVEL` (`off`|`error`|`warn`|`info`|`debug`)
 
 ### 0.11.1-fork.3
 
