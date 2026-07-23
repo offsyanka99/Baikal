@@ -7,14 +7,21 @@
 # ---------------------------------------------------------------------------
 FROM composer:2 AS builder
 
+# `patch` is required by scripts/apply-vendor-patches.sh (post-install + explicit run)
+RUN apk add --no-cache patch
+
 WORKDIR /src
 
 COPY composer.json composer.lock ./
 COPY Core ./Core
 COPY html ./html
 COPY LICENSE SECURITY.md ./
+# Vendor patches (e.g. dual-format calendar-timezone for Home Assistant)
+COPY patches ./patches
+COPY scripts/apply-vendor-patches.sh ./scripts/apply-vendor-patches.sh
 
 RUN composer install --no-interaction --no-dev --prefer-dist --optimize-autoloader \
+    && sh scripts/apply-vendor-patches.sh \
     && rm -f composer.json composer.lock
 
 # ---------------------------------------------------------------------------

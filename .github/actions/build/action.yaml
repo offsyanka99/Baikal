@@ -28,6 +28,10 @@ runs:
         restore-keys: |
           ${{ runner.os }}-composer-
 
+    - name: Install patch (for vendor post-install hooks)
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq patch
+
     - name: Install composer dependencies
       shell: bash
       run: composer install --no-progress --prefer-dist --optimize-autoloader

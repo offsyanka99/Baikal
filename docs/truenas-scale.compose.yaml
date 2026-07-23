@@ -21,6 +21,12 @@
 # 4. Health: http://NAS-IP:31088/health.php
 # 5. Info:   http://NAS-IP:31088/info.php
 #
+# Home Assistant CalDAV:
+#   URL:  http://NAS-IP:31088/dav.php/  (prefer HTTPS via reverse proxy)
+#   User: a Baikal DAV user (create under Admin → Users), not admin
+#   Image includes dual-format calendar-timezone (plain Olson id + VTIMEZONE).
+#   No APPLY_HOME_ASSISTANT_FIX env needed (built-in; see docs/DEPLOYMENT.md).
+#
 # Backup regularly (both mounts):
 #   config/   → baikal.yaml (admin hash, auth, feature flags)
 #   Specific/ → SQLite DB (Specific/db), INSTALL_DISABLED, rate-limit file

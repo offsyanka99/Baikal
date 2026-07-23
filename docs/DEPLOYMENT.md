@@ -1,6 +1,6 @@
 # Deployment guide (fork)
 
-This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, and health endpoints.
+This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, health endpoints, and a dual-format CalDAV calendar-timezone fix for Home Assistant.
 
 ## Images
 
@@ -38,6 +38,30 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 | `/cal.php/` | CalDAV only |
 | `/card.php/` | CardDAV only |
 | `/admin/` | Web admin |
+
+## Home Assistant / calendar-timezone
+
+Baikal stores each calendar’s timezone as a **plain Olson id** (e.g. `America/Toronto`).
+Stock sabre/dav expects a full iCalendar `VCALENDAR`/`VTIMEZONE` blob when clients
+request `calendar-query` with `<C:expand/>` (Home Assistant does this). That
+mismatch produced HTTP 500 / `ParseException` ([sabre-io/dav#1318](https://github.com/sabre-io/dav/issues/1318)).
+
+This fork always applies a **dual-format** resolver after `composer install` (and
+in the Docker image build): plain ids and RFC 4791 VTIMEZONE blobs both work.
+No env flag required (unlike `ckulka/baikal`’s `APPLY_HOME_ASSISTANT_FIX`).
+See [`patches/README.md`](../patches/README.md).
+
+### Connecting Home Assistant
+
+| Field | Example |
+|-------|---------|
+| URL | `https://nas.example/dav.php/` or `http://NAS-IP:31088/dav.php/` |
+| Username / password | A Baikal **DAV user** (not the admin account) |
+| Calendar | Path under that user (HA discovers calendars after auth) |
+
+Prefer **HTTPS** (TrueNAS reverse proxy / Caddy / Traefik) when HA and Baikal
+are not on a trusted LAN-only path. Digest auth is fine on LAN; for internet
+exposure use TLS and consider Basic over HTTPS (see auth notes below).
 
 ## Authentication
 
@@ -89,6 +113,19 @@ docker run --rm -p 8080:80 \
 ```
 
 Open http://127.0.0.1:8080/ and complete setup.
+
+### From source (without Docker)
+
+```bash
+composer install
+# post-install applies patches/ (calendar-timezone, …)
+php tests/php/CalendarTimeZoneResolveTest.php   # optional smoke check
+```
+
+Requires the `patch` command on `PATH`. Re-run after `composer update` if you
+upgrade `sabre/dav` and the patch still applies; refresh
+[`patches/sabre-dav-calendar-timezone.patch`](../patches/sabre-dav-calendar-timezone.patch)
+if a new sabre/dav release changes those files.
 
 ## Upstream
 

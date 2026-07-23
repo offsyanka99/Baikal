@@ -22,6 +22,8 @@ jobs:
         uses: ./.github/actions/build
         with:
           php-version: ${{ matrix.php-versions }}
+      - name: Calendar timezone dual-format unit test
+        run: php tests/php/CalendarTimeZoneResolveTest.php
       - name: Code Analysis (PHP CS-Fixer)
         if: matrix.cs-fixer == true
         run: php vendor/bin/php-cs-fixer fix --dry-run --diff --allow-unsupported-php-version=yes

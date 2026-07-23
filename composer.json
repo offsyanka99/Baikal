@@ -44,6 +44,15 @@
         "test": [
             "composer cs-fixer",
             "composer phpstan"
+        ],
+        "apply-vendor-patches": [
+            "sh scripts/apply-vendor-patches.sh"
+        ],
+        "post-install-cmd": [
+            "@apply-vendor-patches"
+        ],
+        "post-update-cmd": [
+            "@apply-vendor-patches"
         ]
     }
 }

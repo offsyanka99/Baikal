@@ -1,0 +1,146 @@
+diff -ruN a/lib/CalDAV/ICSExportPlugin.php b/lib/CalDAV/ICSExportPlugin.php
+--- a/lib/CalDAV/ICSExportPlugin.php
++++ b/lib/CalDAV/ICSExportPlugin.php
+@@ -234,13 +234,7 @@
+             $tzProp = '{'.Plugin::NS_CALDAV.'}calendar-timezone';
+             $tzResult = $this->server->getProperties($path, [$tzProp]);
+             if (isset($tzResult[$tzProp])) {
+-                // This property contains a VCALENDAR with a single
+-                // VTIMEZONE.
+-                $vtimezoneObj = VObject\Reader::read($tzResult[$tzProp]);
+-                $calendarTimeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
+-                // Destroy circular references to PHP will GC the object.
+-                $vtimezoneObj->destroy();
+-                unset($vtimezoneObj);
++                $calendarTimeZone = Plugin::resolveCalendarTimeZone($tzResult[$tzProp]);
+             } else {
+                 // Defaulting to UTC.
+                 $calendarTimeZone = new DateTimeZone('UTC');
+diff -ruN a/lib/CalDAV/Plugin.php b/lib/CalDAV/Plugin.php
+--- a/lib/CalDAV/Plugin.php
++++ b/lib/CalDAV/Plugin.php
+@@ -447,10 +447,7 @@
+                         $tzProp = '{'.self::NS_CALDAV.'}calendar-timezone';
+                         $tzResult = $this->server->getProperties($calendarPath, [$tzProp]);
+                         if (isset($tzResult[$tzProp])) {
+-                            // This property contains a VCALENDAR with a single
+-                            // VTIMEZONE.
+-                            $vtimezoneObj = VObject\Reader::read($tzResult[$tzProp]);
+-                            $timeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
++                            $timeZone = self::resolveCalendarTimeZone($tzResult[$tzProp]);
+                         } else {
+                             // Defaulting to UTC.
+                             $timeZone = new DateTimeZone('UTC');
+@@ -508,14 +505,7 @@
+             $tzProp = '{'.self::NS_CALDAV.'}calendar-timezone';
+             $tzResult = $this->server->getProperties($path, [$tzProp]);
+             if (isset($tzResult[$tzProp])) {
+-                // This property contains a VCALENDAR with a single
+-                // VTIMEZONE.
+-                $vtimezoneObj = VObject\Reader::read($tzResult[$tzProp]);
+-                $calendarTimeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
+-
+-                // Destroy circular references so PHP will garbage collect the
+-                // object.
+-                $vtimezoneObj->destroy();
++                $calendarTimeZone = self::resolveCalendarTimeZone($tzResult[$tzProp]);
+             } else {
+                 // Defaulting to UTC.
+                 $calendarTimeZone = new DateTimeZone('UTC');
+@@ -655,10 +645,7 @@
+         $calendarProps = $this->server->getProperties($uri, [$tzProp]);
+ 
+         if (isset($calendarProps[$tzProp])) {
+-            $vtimezoneObj = VObject\Reader::read($calendarProps[$tzProp]);
+-            $calendarTimeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
+-            // Destroy circular references so PHP will garbage collect the object.
+-            $vtimezoneObj->destroy();
++            $calendarTimeZone = self::resolveCalendarTimeZone($calendarProps[$tzProp]);
+         } else {
+             $calendarTimeZone = new DateTimeZone('UTC');
+         }
+@@ -1008,4 +995,68 @@
+             'link' => 'http://sabre.io/dav/caldav/',
+         ];
+     }
++
++    /**
++     * Resolve {urn:ietf:params:xml:ns:caldav}calendar-timezone to DateTimeZone.
++     *
++     * RFC 4791 defines calendar-timezone as a VCALENDAR containing a VTIMEZONE.
++     * Baikal (PDO backend) stores a plain Olson id such as "America/Toronto".
++     * Clients that request calendar-data expand (e.g. Home Assistant) previously
++     * caused Sabre\VObject\ParseException when the plain id was VObject-parsed.
++     *
++     * Accepts:
++     *  - plain timezone ids (Olson / PHP DateTimeZone names)
++     *  - iCalendar VCALENDAR/VTIMEZONE blobs
++     * Falls back to UTC if the value cannot be interpreted.
++     *
++     * @param mixed $value Property value from the calendar backend
++     *
++     * @return DateTimeZone
++     */
++    public static function resolveCalendarTimeZone($value)
++    {
++        if (!is_string($value)) {
++            if (is_object($value) && method_exists($value, '__toString')) {
++                $value = (string) $value;
++            } else {
++                return new DateTimeZone('UTC');
++            }
++        }
++
++        $trimmed = trim($value);
++        if ('' === $trimmed) {
++            return new DateTimeZone('UTC');
++        }
++
++        // Plain timezone id — no iCalendar structure (Baikal default storage).
++        if (false === stripos($trimmed, 'BEGIN:')) {
++            try {
++                return new DateTimeZone($trimmed);
++            } catch (\Exception $e) {
++                return new DateTimeZone('UTC');
++            }
++        }
++
++        // RFC 4791: VCALENDAR with a single VTIMEZONE component.
++        try {
++            $vtimezoneObj = VObject\Reader::read($trimmed);
++            if (isset($vtimezoneObj->VTIMEZONE)) {
++                $timeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
++                $vtimezoneObj->destroy();
++
++                return $timeZone;
++            }
++            $vtimezoneObj->destroy();
++        } catch (VObject\ParseException $e) {
++            // Fall through to plain-id / UTC attempts.
++        } catch (\Exception $e) {
++            // Fall through to plain-id / UTC attempts.
++        }
++
++        try {
++            return new DateTimeZone($trimmed);
++        } catch (\Exception $e) {
++            return new DateTimeZone('UTC');
++        }
++    }
+ }
+diff -ruN a/lib/CalDAV/Schedule/Plugin.php b/lib/CalDAV/Schedule/Plugin.php
+--- a/lib/CalDAV/Schedule/Plugin.php
++++ b/lib/CalDAV/Schedule/Plugin.php
+@@ -892,11 +892,7 @@
+             }
+ 
+             if (isset($props[$ctz])) {
+-                $vtimezoneObj = VObject\Reader::read($props[$ctz]);
+-                $calendarTimeZone = $vtimezoneObj->VTIMEZONE->getTimeZone();
+-
+-                // Destroy circular references so PHP can garbage collect the object.
+-                $vtimezoneObj->destroy();
++                $calendarTimeZone = Plugin::resolveCalendarTimeZone($props[$ctz]);
+             }
+ 
+             // Getting the list of object uris within the time-range
