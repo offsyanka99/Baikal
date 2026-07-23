@@ -1,15 +1,5 @@
 import mechanicalsoup, os
-from test_helpers import install_sqlite, install_pgsql, install_mysql, assert_dashboard, BASE_URL
-
-def assert_upgrade(browser: mechanicalsoup.StatefulBrowser):
-    browser.open(BASE_URL)
-    page = browser.get_current_page()
-    assert "baïkal upgrade wizard" in page.text.lower()
-    browser.follow_link(text="Start upgrade")
-    page = browser.get_current_page()
-    assert "baïkal has been successfully upgraded" in page.text.lower()
-    browser.follow_link(text="Access the Baïkal admin")
-    assert_dashboard(browser)
+from test_helpers import install_sqlite, install_pgsql, install_mysql, assert_upgrade
 
 def test_sqlite(browser: mechanicalsoup.StatefulBrowser):
     install_sqlite(browser) # Creates a proper database
