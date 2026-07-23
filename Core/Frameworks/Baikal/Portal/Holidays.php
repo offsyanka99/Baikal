@@ -136,10 +136,8 @@ class Holidays {
             ]);
             $body = curl_exec($ch);
             $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            if (PHP_VERSION_ID < 80500) {
-                // curl_close() is a no-op / deprecated on PHP 8.5+
-                curl_close($ch);
-            }
+            // CurlHandle is closed when $ch goes out of scope (curl_close is deprecated on PHP 8.5+)
+            unset($ch);
             if ($body === false || $code < 200 || $code >= 300) {
                 return null;
             }
