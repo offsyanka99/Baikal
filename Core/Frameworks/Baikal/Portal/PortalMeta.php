@@ -57,6 +57,16 @@ class PortalMeta {
         return $this->get($instanceId)['readOnly'];
     }
 
+    /** Drop flags for a deleted calendar instance. */
+    public function remove(int $instanceId): void {
+        $key = (string) $instanceId;
+        if (!isset($this->data[$key])) {
+            return;
+        }
+        unset($this->data[$key]);
+        $this->save();
+    }
+
     private function load(): void {
         if (!is_readable($this->path)) {
             $this->data = [];

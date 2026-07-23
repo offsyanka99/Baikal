@@ -3,6 +3,7 @@ import {
   ApiError,
   type AddressBook,
   type Calendar,
+  type CalendarEvent,
   type ContactCustomField,
   type ContactDetail,
   type ContactPhone,
@@ -10,11 +11,14 @@ import {
   type DirectoryUser,
   type HolidayCountry,
   type ImportResult,
+  type ItemCalendarOption,
+  type NoteItem,
   type PortalUser,
   type Share,
+  type TaskItem,
 } from "./api";
 
-type TabId = "calendars" | "contacts";
+type TabId = "calendars" | "contacts" | "tasks" | "notes";
 
 const APP_VERSION = "0.11.1-fork.3";
 const DOCS_URL = "https://github.com/offsyanka99/Baikal/tree/master/docs";
@@ -54,7 +58,7 @@ function formatImportResult(r: ImportResult): string {
 /** Section help texts shown in (i) info modals */
 const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
   "my-calendars": {
-    title: "My calendars",
+    title: "Calendar",
     paragraphs: [
       "Create and edit calendars, then share them with other Baïkal users.",
       "CalDAV clients (Thunderbird, Apple Calendar, DAVx⁵, Home Assistant, …) keep using /dav.php/ — this portal is for management only.",
@@ -104,10 +108,25 @@ const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
     ],
   },
   "my-contacts": {
-    title: "My contacts",
+    title: "Contacts",
     paragraphs: [
       "Manage address books and individual contacts for CardDAV. Clients (Thunderbird, DAVx⁵, …) keep using /dav.php/.",
       "Create or rename address books, search contacts, add/edit/delete cards, upload photos, and import/export .vcf files.",
+    ],
+  },
+  tasks: {
+    title: "Tasks",
+    paragraphs: [
+      "Tasks are CalDAV VTODO items stored in your calendars. They sync with Apple Reminders, Thunderbird, DAVx⁵, and other clients via /dav.php/.",
+      "Subtasks use RELATED-TO;RELTYPE=PARENT (same calendar). Add a subtask from a parent, or set Parent in the form. Deleting a parent promotes its children to top-level.",
+      "Click a column header to sort. Create tasks on any writable calendar that allows VTODO components.",
+    ],
+  },
+  notes: {
+    title: "Notes",
+    paragraphs: [
+      "Notes are CalDAV VJOURNAL items stored in your calendars. Compatible clients sync them over /dav.php/.",
+      "Click a column header to sort. Pick a writable calendar when creating a note.",
     ],
   },
   "address-books": {
@@ -172,6 +191,14 @@ export function mountApp(root: HTMLElement): void {
   let holidayCountries: HolidayCountry[] = [];
   let selectedId: number | null = null;
   let shares: Share[] = [];
+  /** Calendar details + share live in a modal (not the right column). */
+  let calModalOpen = false;
+  /** Owned calendar pending delete confirmation. */
+  let deleteConfirmId: number | null = null;
+  /** Month grid cursor (local calendar). */
+  let monthCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
+  let monthEvents: CalendarEvent[] = [];
+  let monthEventsLoading = false;
   let addressBooks: AddressBook[] = [];
   let selectedAbId: number | null = null;
   let contacts: ContactSummary[] = [];
@@ -189,6 +216,26 @@ export function mountApp(root: HTMLElement): void {
   let lastContactImportResult: { ok: boolean; message: string } | null = null;
   let escapeBound = false;
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Tasks / Notes (CalDAV VTODO / VJOURNAL)
+  let tasks: TaskItem[] = [];
+  let notes: NoteItem[] = [];
+  let taskCalendars: ItemCalendarOption[] = [];
+  let noteCalendars: ItemCalendarOption[] = [];
+  let taskSearch = "";
+  let noteSearch = "";
+  let taskSort = "due";
+  let taskOrder: "asc" | "desc" = "asc";
+  let noteSort = "dtstart";
+  let noteOrder: "asc" | "desc" = "desc";
+  let selectedTaskKey: string | null = null; // instanceId|uri
+  let selectedNoteKey: string | null = null;
+  let editingTask: TaskItem | null = null;
+  let editingNote: NoteItem | null = null;
+  let creatingTask = false;
+  let creatingNote = false;
+  /** Multi-select keys (instanceId|uri) for bulk actions on Tasks */
+  let checkedTaskKeys: string[] = [];
 
   function setFlash(type: Flash extends null ? never : NonNullable<Flash>["type"], message: string) {
     flash = { type, message };
@@ -233,15 +280,22 @@ export function mountApp(root: HTMLElement): void {
     if (selectedId !== null && !calendars.some((c) => c.id === selectedId)) {
       selectedId = null;
       shares = [];
+      calModalOpen = false;
+      deleteConfirmId = null;
     }
     if (selectedId === null) {
-      const firstOwn = calendars.find((c) => c.canShare);
-      if (firstOwn) {
-        selectedId = firstOwn.id;
-        await loadShares(firstOwn.id);
+      const def = pickDefaultCalendar();
+      if (def) {
+        selectedId = def.id;
       }
-    } else {
+    }
+    if (selectedId !== null && calModalOpen) {
       await loadShares(selectedId);
+    } else if (selectedId !== null) {
+      shares = [];
+    }
+    if (activeTab === "calendars") {
+      await loadMonthEvents();
     }
     if (selectedAbId !== null && !addressBooks.some((a) => a.id === selectedAbId)) {
       selectedAbId = null;
@@ -263,6 +317,167 @@ export function mountApp(root: HTMLElement): void {
     shares = res.shares;
   }
 
+  /** Prefer uri/name "default", else first owned calendar. */
+  function pickDefaultCalendar(): Calendar | null {
+    const own = calendars.filter((c) => c.canShare);
+    if (own.length === 0) return null;
+    const isDefault = (c: Calendar) => {
+      const u = c.uri.toLowerCase();
+      const n = c.displayname.toLowerCase();
+      return u === "default" || n === "default" || n === "default calendar";
+    };
+    return own.find(isDefault) ?? own[0] ?? null;
+  }
+
+  function ymd(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function monthRange(y: number, m: number): { from: string; to: string } {
+    const from = new Date(y, m, 1);
+    const to = new Date(y, m + 1, 0);
+    return { from: ymd(from), to: ymd(to) };
+  }
+
+  function eventDayKey(ev: CalendarEvent): string {
+    if (ev.allDay || /^\d{4}-\d{2}-\d{2}$/.test(ev.start)) {
+      return ev.start.slice(0, 10);
+    }
+    const d = new Date(ev.start);
+    if (Number.isNaN(d.getTime())) return ev.start.slice(0, 10);
+    return ymd(d);
+  }
+
+  async function loadMonthEvents() {
+    if (selectedId === null) {
+      monthEvents = [];
+      return;
+    }
+    const { from, to } = monthRange(monthCursor.y, monthCursor.m);
+    monthEventsLoading = true;
+    try {
+      const res = await api.calendarEvents(selectedId, from, to);
+      monthEvents = res.events;
+    } catch {
+      monthEvents = [];
+    } finally {
+      monthEventsLoading = false;
+    }
+  }
+
+  function monthTitle(y: number, m: number): string {
+    return new Date(y, m, 1).toLocaleString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+  }
+
+  function renderMonthGrid(): string {
+    const selected = selectedId !== null ? calendars.find((c) => c.id === selectedId) : null;
+    const calName = selected?.displayname ?? "Calendar";
+    const color = selected?.color
+      ? selected.color.length >= 7
+        ? selected.color.slice(0, 7)
+        : selected.color
+      : "#3B82F6";
+
+    const y = monthCursor.y;
+    const m = monthCursor.m;
+    const first = new Date(y, m, 1);
+    // Monday-first (match common EU / screenshot layout)
+    const startPad = (first.getDay() + 6) % 7;
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const prevDays = new Date(y, m, 0).getDate();
+    const today = new Date();
+    const todayKey = ymd(today);
+
+    const byDay = new Map<string, CalendarEvent[]>();
+    for (const ev of monthEvents) {
+      const key = eventDayKey(ev);
+      const list = byDay.get(key) ?? [];
+      list.push(ev);
+      byDay.set(key, list);
+    }
+
+    const cells: string[] = [];
+    const totalCells = Math.ceil((startPad + daysInMonth) / 7) * 7;
+    for (let i = 0; i < totalCells; i++) {
+      let dayNum: number;
+      let inMonth = true;
+      let cellDate: Date;
+      if (i < startPad) {
+        dayNum = prevDays - startPad + i + 1;
+        inMonth = false;
+        cellDate = new Date(y, m - 1, dayNum);
+      } else if (i >= startPad + daysInMonth) {
+        dayNum = i - (startPad + daysInMonth) + 1;
+        inMonth = false;
+        cellDate = new Date(y, m + 1, dayNum);
+      } else {
+        dayNum = i - startPad + 1;
+        cellDate = new Date(y, m, dayNum);
+      }
+      const key = ymd(cellDate);
+      const isToday = key === todayKey;
+      const dayEvents = inMonth ? byDay.get(key) ?? [] : [];
+      const maxShow = 3;
+      const shown = dayEvents.slice(0, maxShow);
+      const more = dayEvents.length - shown.length;
+      const chips = shown
+        .map(
+          (ev) =>
+            `<span class="month-event" title="${esc(ev.summary)}" style="--ev-color:${esc(color)}">${esc(ev.summary)}</span>`,
+        )
+        .join("");
+      const moreHtml =
+        more > 0 ? `<span class="month-event-more">+${more} more</span>` : "";
+      const dayLabel =
+        !inMonth && (dayNum === 1 || i === startPad + daysInMonth)
+          ? cellDate.toLocaleString(undefined, { month: "short", day: "numeric" })
+          : String(dayNum);
+      cells.push(`<div class="month-cell${inMonth ? "" : " is-outside"}${isToday ? " is-today" : ""}">
+        <div class="month-daynum${isToday ? " is-today-num" : ""}">${esc(dayLabel)}</div>
+        <div class="month-events">${chips}${moreHtml}</div>
+      </div>`);
+    }
+
+    const emptyHint =
+      !selected
+        ? `<p class="muted small month-empty-hint">No calendars yet — create one on the left. The grid stays empty until events exist.</p>`
+        : monthEventsLoading
+          ? `<p class="muted small month-empty-hint">Loading events…</p>`
+          : "";
+
+    return `<section class="card month-cal-card">
+      <div class="month-cal-toolbar">
+        <button type="button" class="btn btn-ghost btn-small" data-action="month-today" ${busy ? "disabled" : ""}>Today</button>
+        <div class="month-nav">
+          <button type="button" class="btn btn-ghost btn-small month-nav-btn" data-action="month-prev" aria-label="Previous month" ${busy ? "disabled" : ""}>‹</button>
+          <button type="button" class="btn btn-ghost btn-small month-nav-btn" data-action="month-next" aria-label="Next month" ${busy ? "disabled" : ""}>›</button>
+        </div>
+        <h2 class="month-cal-title">${esc(monthTitle(y, m))}</h2>
+        <span class="month-cal-name muted small" title="${esc(calName)}">
+          <span class="cal-swatch" style="background:${esc(color)};margin-top:0"></span>
+          ${esc(calName)}
+        </span>
+      </div>
+      ${emptyHint}
+      <div class="month-grid-wrap" role="grid" aria-label="Month calendar">
+        <div class="month-dow-row" role="row">
+          <div class="month-dow">Mon</div><div class="month-dow">Tue</div><div class="month-dow">Wed</div>
+          <div class="month-dow">Thu</div><div class="month-dow">Fri</div><div class="month-dow">Sat</div>
+          <div class="month-dow">Sun</div>
+        </div>
+        <div class="month-grid" role="rowgroup">
+          ${cells.join("")}
+        </div>
+      </div>
+    </section>`;
+  }
+
   async function loadContacts(abId: number) {
     const res = await api.contacts(abId, contactSearch);
     contacts = res.contacts;
@@ -278,6 +493,81 @@ export function mountApp(root: HTMLElement): void {
         removePhotoPending = false;
       }
     }
+  }
+
+  async function loadTasks() {
+    const res = await api.tasks({ q: taskSearch, sort: taskSort, order: taskOrder });
+    tasks = res.tasks;
+    taskCalendars = res.calendars;
+    const keySet = new Set(tasks.map((t) => itemKey(t.instanceId, t.uri)));
+    checkedTaskKeys = checkedTaskKeys.filter((k) => keySet.has(k));
+    if (
+      selectedTaskKey !== null &&
+      !tasks.some((t) => `${t.instanceId}|${t.uri}` === selectedTaskKey)
+    ) {
+      selectedTaskKey = null;
+      if (!creatingTask) editingTask = null;
+    }
+  }
+
+  async function loadNotes() {
+    const res = await api.notes({ q: noteSearch, sort: noteSort, order: noteOrder });
+    notes = res.notes;
+    noteCalendars = res.calendars;
+    if (
+      selectedNoteKey !== null &&
+      !notes.some((n) => `${n.instanceId}|${n.uri}` === selectedNoteKey)
+    ) {
+      selectedNoteKey = null;
+      if (!creatingNote) editingNote = null;
+    }
+  }
+
+  function itemKey(instanceId: number, uri: string): string {
+    return `${instanceId}|${uri}`;
+  }
+
+  function formatWhen(iso: string | null | undefined): string {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      return d.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return iso;
+    }
+  }
+
+  function toLocalInputValue(iso: string | null | undefined): string {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch {
+      return "";
+    }
+  }
+
+  function sortHeader(
+    label: string,
+    col: string,
+    current: string,
+    order: "asc" | "desc",
+    kind: "task" | "note",
+    colClass = "",
+  ): string {
+    const active = current === col;
+    const arrow = active ? (order === "asc" ? " ▲" : " ▼") : "";
+    const cls = `sortable-th${active ? " is-sorted" : ""}${colClass ? " " + colClass : ""}`;
+    return `<th class="${cls}" data-action="sort-${kind}" data-sort="${esc(col)}" role="columnheader" tabindex="0">${esc(label)}${arrow}</th>`;
   }
 
   async function openContact(uri: string) {
@@ -362,9 +652,9 @@ export function mountApp(root: HTMLElement): void {
           <a class="brand" href="/portal/">${brand}</a>
         </nav>`;
 
-    const flashHtml = flash
-      ? `<div class="flash flash-${esc(flash.type)}" role="status">${esc(flash.message)}</div>`
-      : "";
+    // When calendar edit modal is open, flash is rendered inside the modal instead
+    const flashOnMain = !(calModalOpen || deleteConfirmId !== null);
+    const flashHtml = flashOnMain ? renderFlashBanner() : "";
 
     const footer = `
       <footer class="site-footer">
@@ -388,6 +678,15 @@ export function mountApp(root: HTMLElement): void {
       </main>
       ${footer}
       ${infoModalHtml()}`;
+  }
+
+  /** Success/error banner; shown on main page or inside open calendar modal. */
+  function renderFlashBanner(): string {
+    if (!flash) return "";
+    return `<div class="flash flash-${esc(flash.type)}" role="status">
+      <span class="flash-text">${esc(flash.message)}</span>
+      <button type="button" class="flash-close" data-action="flash-close" aria-label="Dismiss message" title="Dismiss">×</button>
+    </div>`;
   }
 
   function renderLogin() {
@@ -438,14 +737,18 @@ export function mountApp(root: HTMLElement): void {
           (c.holidaysCountry
             ? `<span class="badge badge-admin">holidays ${esc(c.holidaysCountry)}</span>`
             : "");
-        return `<button type="button" class="cal-row${active}" data-action="select-cal" data-id="${c.id}">
+        return `<div class="cal-row${active}" data-action="select-cal" data-id="${c.id}" role="button" tabindex="0">
           ${color}
           <span class="cal-row-text">
             <span class="cal-row-title">${esc(c.displayname)}</span>
             <span class="cal-row-badges">${badges}</span>
             <span class="muted small mono cal-row-uri">${esc(c.uri)}</span>
           </span>
-        </button>`;
+          <span class="cal-row-actions">
+            <button type="button" class="btn btn-small" data-action="edit-cal" data-id="${c.id}" ${busy ? "disabled" : ""}>Edit</button>
+            <button type="button" class="btn btn-small btn-danger" data-action="delete-cal" data-id="${c.id}" ${busy ? "disabled" : ""}>Delete</button>
+          </span>
+        </div>`;
       })
       .join("");
 
@@ -494,112 +797,145 @@ export function mountApp(root: HTMLElement): void {
         : "#3B82F6"
       : "#3B82F6";
 
-    const detailsPanel =
-      selected && selected.canShare
-        ? `<div class="card">
-            ${infoTitle("Calendar details", "calendar-details")}
-            <form class="stack" data-form="edit-cal" style="margin-top:1rem">
-              <label>
-                Display name
-                <input type="text" name="displayname" required maxlength="200"
-                  value="${esc(selected.displayname)}" autocomplete="off" />
-              </label>
-              <label>
-                Color
-                <span class="color-field">
-                  <input type="color" name="color_picker" value="${esc(colorValue)}"
-                    title="Pick a color" aria-label="Calendar color picker" />
-                  <input type="text" name="color" class="mono" maxlength="9"
-                    value="${esc(selected.color || colorValue)}"
-                    placeholder="#3B82F6" pattern="#?[0-9A-Fa-f]{3,8}" autocomplete="off" />
-                </span>
-              </label>
-              <label>
-                Description
-                <textarea name="description" rows="3" maxlength="2000"
-                  placeholder="Optional notes for this calendar">${esc(selected.description)}</textarea>
-              </label>
-              <div class="form-actions-row">
-                <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Save changes</button>
-                <span class="muted small mono">${esc(selected.uri)}</span>
-              </div>
-            </form>
-
-            <div class="import-export" style="margin-top:1.35rem">
-              ${infoTitle("Import / export", "import-export")}
-              ${
-                selected.readOnly
-                  ? `<p class="muted small" style="margin-top:0.5rem"><strong>Read-only:</strong> import disabled.</p>`
-                  : ""
-              }
-              <div class="form-actions-row" style="margin-top:0.75rem">
-                <button type="button" class="btn" data-action="export-cal" ${busy ? "disabled" : ""}>Export .ics</button>
-                <label class="btn btn-ghost file-btn" ${busy || selected.readOnly ? "aria-disabled=true" : ""}>
-                  Import .ics
-                  <input type="file" accept=".ics,text/calendar,text/plain" data-action="import-cal" ${busy || selected.readOnly ? "disabled" : ""} hidden />
-                </label>
-              </div>
-              ${
-                lastImportResult
-                  ? `<div class="flash flash-${lastImportResult.ok ? "success" : "error"} import-result" role="status">
-                      <strong>Import result:</strong> ${esc(lastImportResult.message)}
-                    </div>`
-                  : ""
-              }
-            </div>
-          </div>`
-        : selected && !selected.canShare
-          ? `<div class="card">
-              ${infoTitle("Shared calendar", "shared-with-me")}
-              <div class="form-actions-row" style="margin-top:0.75rem">
-                <button type="button" class="btn" data-action="export-cal" ${busy ? "disabled" : ""}>Export .ics</button>
-              </div>
-            </div>`
-          : `<div class="card"><p class="muted">Select a calendar you own to edit details or sharing.</p></div>`;
-
     const shareReadOnlyForced = !!(selected && selected.readOnly);
-    const sharePanel =
-      selected && selected.canShare
-        ? `<div class="card">
-            ${infoTitle(`Share “${selected.displayname}”`, "share")}
-            ${
-              shareReadOnlyForced
-                ? `<p class="muted small" style="margin-top:0.35rem"><strong>Read-only calendar:</strong> shares are always read-only.</p>`
-                : ""
-            }
-            <form class="form-grid" data-form="share" style="margin-top:1rem">
-              <label>
-                User
-                <select name="username" required ${directory.length === 0 ? "disabled" : ""}>
-                  <option value="">${directory.length ? "Select user…" : "No other users"}</option>
-                  ${userOptions}
-                </select>
-              </label>
-              <label>
-                Access
-                <select name="access" ${shareReadOnlyForced ? "disabled" : ""}>
-                  <option value="read" selected>Read only</option>
-                  ${shareReadOnlyForced ? "" : '<option value="readwrite">Full access</option>'}
-                </select>
-                ${shareReadOnlyForced ? '<input type="hidden" name="access" value="read" />' : ""}
-              </label>
-              <div class="form-actions">
-                <button type="submit" class="btn btn-primary" ${busy || directory.length === 0 ? "disabled" : ""}>Share</button>
+    const calModal =
+      calModalOpen && selected && selected.canShare
+        ? `<div class="cal-modal" id="cal-edit-modal" role="dialog" aria-modal="true" aria-labelledby="cal-modal-title">
+            <div class="cal-modal-backdrop" data-action="close-cal-modal"></div>
+            <div class="cal-modal-card">
+              <header class="cal-modal-header">
+                <h3 id="cal-modal-title">Calendar details</h3>
+                <button type="button" class="info-modal-close" data-action="close-cal-modal" aria-label="Close">×</button>
+              </header>
+              <div class="cal-modal-body">
+                ${renderFlashBanner()}
+                <section>
+                  ${infoTitle("Calendar details", "calendar-details")}
+                  <form class="stack" data-form="edit-cal" style="margin-top:1rem">
+                    <label>
+                      Display name
+                      <input type="text" name="displayname" required maxlength="200"
+                        value="${esc(selected.displayname)}" autocomplete="off" />
+                    </label>
+                    <label>
+                      Color
+                      <span class="color-field">
+                        <input type="color" name="color_picker" value="${esc(colorValue)}"
+                          title="Pick a color" aria-label="Calendar color picker" />
+                        <input type="text" name="color" class="mono" maxlength="9"
+                          value="${esc(selected.color || colorValue)}"
+                          placeholder="#3B82F6" pattern="#?[0-9A-Fa-f]{3,8}" autocomplete="off" />
+                      </span>
+                    </label>
+                    <label>
+                      Description
+                      <textarea name="description" rows="3" maxlength="2000"
+                        placeholder="Optional notes for this calendar">${esc(selected.description)}</textarea>
+                    </label>
+                    <div class="form-actions-row">
+                      <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Save changes</button>
+                      <span class="muted small mono">${esc(selected.uri)}</span>
+                    </div>
+                  </form>
+                  <div class="import-export" style="margin-top:1.35rem">
+                    ${infoTitle("Import / export", "import-export")}
+                    ${
+                      selected.readOnly
+                        ? `<p class="muted small" style="margin-top:0.5rem"><strong>Read-only:</strong> import disabled.</p>`
+                        : ""
+                    }
+                    <div class="form-actions-row" style="margin-top:0.75rem">
+                      <button type="button" class="btn" data-action="export-cal" ${busy ? "disabled" : ""}>Export .ics</button>
+                      <label class="btn btn-ghost file-btn" ${busy || selected.readOnly ? "aria-disabled=true" : ""}>
+                        Import .ics
+                        <input type="file" accept=".ics,text/calendar,text/plain" data-action="import-cal" ${busy || selected.readOnly ? "disabled" : ""} hidden />
+                      </label>
+                    </div>
+                    ${
+                      lastImportResult
+                        ? `<div class="flash flash-${lastImportResult.ok ? "success" : "error"} import-result" role="status">
+                            <strong>Import result:</strong> ${esc(lastImportResult.message)}
+                          </div>`
+                        : ""
+                    }
+                  </div>
+                </section>
+                <section style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--border)">
+                  ${infoTitle(`Share “${selected.displayname}”`, "share")}
+                  ${
+                    shareReadOnlyForced
+                      ? `<p class="muted small" style="margin-top:0.35rem"><strong>Read-only calendar:</strong> shares are always read-only.</p>`
+                      : ""
+                  }
+                  <form class="form-grid" data-form="share" style="margin-top:1rem">
+                    <label>
+                      User
+                      <select name="username" required ${directory.length === 0 ? "disabled" : ""}>
+                        <option value="">${directory.length ? "Select user…" : "No other users"}</option>
+                        ${userOptions}
+                      </select>
+                    </label>
+                    <label>
+                      Access
+                      <select name="access" ${shareReadOnlyForced ? "disabled" : ""}>
+                        <option value="read" selected>Read only</option>
+                        ${shareReadOnlyForced ? "" : '<option value="readwrite">Full access</option>'}
+                      </select>
+                      ${shareReadOnlyForced ? '<input type="hidden" name="access" value="read" />' : ""}
+                    </label>
+                    <div class="form-actions">
+                      <button type="submit" class="btn btn-primary" ${busy || directory.length === 0 ? "disabled" : ""}>Share</button>
+                    </div>
+                  </form>
+                  <div class="table-wrap" style="margin-top:1.25rem">
+                    <table>
+                      <thead>
+                        <tr><th>Shared with</th><th>Access</th><th></th></tr>
+                      </thead>
+                      <tbody>${shareRows}</tbody>
+                    </table>
+                  </div>
+                </section>
               </div>
-            </form>
-            <div class="table-wrap" style="margin-top:1.25rem">
-              <table>
-                <thead>
-                  <tr><th>Shared with</th><th>Access</th><th></th></tr>
-                </thead>
-                <tbody>${shareRows}</tbody>
-              </table>
+              <footer class="cal-modal-footer">
+                <button type="button" class="btn btn-ghost" data-action="close-cal-modal">Close</button>
+              </footer>
             </div>
           </div>`
         : "";
 
+    const deleteTarget =
+      deleteConfirmId !== null
+        ? calendars.find((c) => c.id === deleteConfirmId && c.canShare) ?? null
+        : null;
+    const deleteModal = deleteTarget
+      ? `<div class="cal-modal" id="cal-delete-modal" role="dialog" aria-modal="true" aria-labelledby="cal-delete-title">
+          <div class="cal-modal-backdrop" data-action="cancel-delete-cal"></div>
+          <div class="cal-modal-card cal-modal-card-sm">
+            <header class="cal-modal-header">
+              <h3 id="cal-delete-title">Delete calendar</h3>
+              <button type="button" class="info-modal-close" data-action="cancel-delete-cal" aria-label="Close">×</button>
+            </header>
+            <div class="cal-modal-body">
+              ${renderFlashBanner()}
+              <p>You are about to permanently delete <strong>${esc(deleteTarget.displayname)}</strong>
+                <span class="muted small mono">(${esc(deleteTarget.uri)})</span>.</p>
+              <p class="muted small">All events, tasks, and notes in this calendar will be removed. Shares will be revoked. This cannot be undone.</p>
+              <label class="checkbox" style="margin-top:1rem">
+                <input type="checkbox" id="delete-cal-confirm" data-action="toggle-delete-confirm" />
+                I understand and want to permanently delete this calendar
+              </label>
+            </div>
+            <footer class="cal-modal-footer">
+              <button type="button" class="btn btn-ghost" data-action="cancel-delete-cal" ${busy ? "disabled" : ""}>Cancel</button>
+              <button type="button" class="btn btn-danger" data-action="confirm-delete-cal" data-id="${deleteTarget.id}" disabled id="delete-cal-submit">Delete permanently</button>
+            </footer>
+          </div>
+        </div>`
+      : "";
+
     const calendarsTab = `
-      <div class="portal-grid">
+      <div class="portal-grid portal-grid-calendars">
         <section class="card">
           ${infoTitle("Owned", "owned")}
           <div class="cal-list" style="margin-top:0.75rem">
@@ -657,11 +993,10 @@ export function mountApp(root: HTMLElement): void {
               : ""
           }
         </section>
-        <section class="stack">
-          ${detailsPanel}
-          ${sharePanel}
-        </section>
-      </div>`;
+        ${renderMonthGrid()}
+      </div>
+      ${calModal}
+      ${deleteModal}`;
 
     const abRows = addressBooks
       .map((a) => {
@@ -963,25 +1298,463 @@ export function mountApp(root: HTMLElement): void {
         </section>
       </div>`;
 
+    const tabInfoKey =
+      activeTab === "calendars"
+        ? "my-calendars"
+        : activeTab === "contacts"
+          ? "my-contacts"
+          : activeTab === "tasks"
+            ? "tasks"
+            : "notes";
+
+    const tasksTab = renderTasksTab();
+    const notesTab = renderNotesTab();
+    const mainTab =
+      activeTab === "calendars"
+        ? calendarsTab
+        : activeTab === "contacts"
+          ? contactsTab
+          : activeTab === "tasks"
+            ? tasksTab
+            : notesTab;
+
     root.innerHTML = shell(`
       <header class="page-header">
         <div class="tabs" role="tablist" aria-label="Portal sections">
           <button type="button" role="tab" class="tab-btn${activeTab === "calendars" ? " is-active" : ""}"
             data-action="tab" data-tab="calendars" aria-selected="${activeTab === "calendars"}">
-            My Calendars
+            Calendar
           </button>
           <button type="button" role="tab" class="tab-btn${activeTab === "contacts" ? " is-active" : ""}"
             data-action="tab" data-tab="contacts" aria-selected="${activeTab === "contacts"}">
-            My Contacts
+            Contacts
+          </button>
+          <button type="button" role="tab" class="tab-btn${activeTab === "tasks" ? " is-active" : ""}"
+            data-action="tab" data-tab="tasks" aria-selected="${activeTab === "tasks"}">
+            Tasks
+          </button>
+          <button type="button" role="tab" class="tab-btn${activeTab === "notes" ? " is-active" : ""}"
+            data-action="tab" data-tab="notes" aria-selected="${activeTab === "notes"}">
+            Notes
           </button>
           <button type="button" class="info-btn tab-info" data-action="info"
-            data-info="${activeTab === "calendars" ? "my-calendars" : "my-contacts"}"
+            data-info="${tabInfoKey}"
             aria-label="About this tab" title="About this tab"><span aria-hidden="true">i</span></button>
         </div>
       </header>
 
-      ${activeTab === "calendars" ? calendarsTab : contactsTab}
+      ${mainTab}
     `);
+    document.body.classList.toggle(
+      "cal-modal-open",
+      calModalOpen || deleteConfirmId !== null,
+    );
+  }
+
+  /** Flatten tasks as a tree (subtasks under parent via RELATED-TO parentUid). */
+  function tasksInTreeOrder(list: TaskItem[]): { task: TaskItem; depth: number }[] {
+    const byUid = new Map<string, TaskItem>();
+    for (const t of list) {
+      if (t.uid) byUid.set(t.uid, t);
+    }
+    const orderIndex = new Map(list.map((t, i) => [itemKey(t.instanceId, t.uri), i]));
+    const children = new Map<string, TaskItem[]>();
+    const roots: TaskItem[] = [];
+    for (const t of list) {
+      const p = t.parentUid;
+      if (p && byUid.has(p) && p !== t.uid) {
+        const arr = children.get(p) ?? [];
+        arr.push(t);
+        children.set(p, arr);
+      } else {
+        roots.push(t);
+      }
+    }
+    const byOrder = (a: TaskItem, b: TaskItem) =>
+      (orderIndex.get(itemKey(a.instanceId, a.uri)) ?? 0) -
+      (orderIndex.get(itemKey(b.instanceId, b.uri)) ?? 0);
+    roots.sort(byOrder);
+    for (const [, kids] of children) kids.sort(byOrder);
+
+    const out: { task: TaskItem; depth: number }[] = [];
+    const visiting = new Set<string>();
+    const walk = (t: TaskItem, depth: number) => {
+      const id = t.uid || itemKey(t.instanceId, t.uri);
+      if (visiting.has(id)) return;
+      visiting.add(id);
+      out.push({ task: t, depth: Math.min(depth, 8) });
+      for (const c of children.get(t.uid) ?? []) {
+        walk(c, depth + 1);
+      }
+      visiting.delete(id);
+    };
+    for (const r of roots) walk(r, 0);
+    // Any unvisited (shouldn't happen) — append flat
+    for (const t of list) {
+      if (!out.some((x) => x.task === t)) out.push({ task: t, depth: 0 });
+    }
+    return out;
+  }
+
+  /** UIDs that cannot be chosen as parent of `self` (self + descendants). */
+  function taskDescendantUids(selfUid: string): Set<string> {
+    const blocked = new Set<string>([selfUid]);
+    if (!selfUid) return blocked;
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const t of tasks) {
+        if (t.parentUid && blocked.has(t.parentUid) && t.uid && !blocked.has(t.uid)) {
+          blocked.add(t.uid);
+          grew = true;
+        }
+      }
+    }
+    return blocked;
+  }
+
+  function parentTaskOptions(forTask: TaskItem, creating: boolean): string {
+    const calInstance = forTask.instanceId;
+    const blocked = creating || !forTask.uid ? new Set<string>() : taskDescendantUids(forTask.uid);
+    const candidates = tasks.filter(
+      (x) =>
+        x.uid &&
+        x.instanceId === calInstance &&
+        !blocked.has(x.uid) &&
+        x.uid !== forTask.uid,
+    );
+    const selected = forTask.parentUid || "";
+    const opts = [
+      `<option value="">None (top-level)</option>`,
+      ...candidates.map(
+        (x) =>
+          `<option value="${esc(x.uid)}" ${x.uid === selected ? "selected" : ""}>${esc(x.summary || x.uid)}</option>`,
+      ),
+    ];
+    // Keep selected parent visible even if filtered out of list (e.g. other calendar)
+    if (selected && !candidates.some((x) => x.uid === selected)) {
+      const orphan = tasks.find((x) => x.uid === selected);
+      opts.push(
+        `<option value="${esc(selected)}" selected>${esc(orphan?.summary || selected)} (current)</option>`,
+      );
+    }
+    return opts.join("");
+  }
+
+  function writableCheckedTasks(): TaskItem[] {
+    const set = new Set(checkedTaskKeys);
+    return tasks.filter((t) => set.has(itemKey(t.instanceId, t.uri)) && t.canWrite && !t.readOnly);
+  }
+
+  function renderTasksTab(): string {
+    const statusLabel = (s: string) => {
+      const m: Record<string, string> = {
+        "NEEDS-ACTION": "To do",
+        "IN-PROCESS": "In progress",
+        COMPLETED: "Done",
+        CANCELLED: "Cancelled",
+      };
+      return m[s] || s;
+    };
+    const tree = tasksInTreeOrder(tasks);
+    const writableKeys = tasks
+      .filter((t) => t.canWrite && !t.readOnly)
+      .map((t) => itemKey(t.instanceId, t.uri));
+    const allWritableChecked =
+      writableKeys.length > 0 && writableKeys.every((k) => checkedTaskKeys.includes(k));
+    const someChecked = checkedTaskKeys.length > 0;
+    const checkedWritable = writableCheckedTasks();
+    const nChecked = checkedWritable.length;
+
+    const rows =
+      tasks.length === 0
+        ? `<tr class="contacts-empty-row"><td colspan="6" class="muted">${
+            taskSearch ? "No tasks match your search." : "No tasks yet. Add one below."
+          }</td></tr>`
+        : tree
+            .map(({ task: t, depth }) => {
+              const key = itemKey(t.instanceId, t.uri);
+              const active = !creatingTask && key === selectedTaskKey ? " is-selected" : "";
+              const checked = checkedTaskKeys.includes(key);
+              const st = t.status === "COMPLETED" ? "badge-ok" : t.status === "CANCELLED" ? "" : "badge-admin";
+              const indent = depth > 0 ? ` style="--task-depth:${depth}"` : "";
+              const marker =
+                depth > 0
+                  ? `<span class="task-subtask-marker" aria-hidden="true">↳</span>`
+                  : "";
+              const canCheck = t.canWrite && !t.readOnly;
+              return `<tr class="contact-table-row task-row${depth > 0 ? " is-subtask" : ""}${active}${checked ? " is-checked" : ""}" data-action="select-task" data-instance="${t.instanceId}" data-uri="${esc(t.uri)}" tabindex="0" role="button"${indent}>
+                <td class="col-task-check" data-stop-row>
+                  <input type="checkbox" class="task-check" data-action="task-check" data-instance="${t.instanceId}" data-uri="${esc(t.uri)}"
+                    ${checked ? "checked" : ""} ${canCheck ? "" : "disabled"} aria-label="Select ${esc(t.summary || t.uri)}" ${busy ? "disabled" : ""} />
+                </td>
+                <td class="col-task-title"><span class="task-title-inner">${marker}<span class="contact-name-primary">${esc(t.summary || t.uri)}</span></span>
+                  ${t.readOnly ? '<span class="badge">read-only</span>' : ""}</td>
+                <td class="col-task-status"><span class="badge ${st}">${esc(statusLabel(t.status))}</span></td>
+                <td class="col-task-due muted small">${esc(formatWhen(t.due))}</td>
+                <td class="col-task-cal muted small">${esc(t.calendarName)}</td>
+                <td class="col-task-pct muted small">${t.percent ? esc(String(t.percent)) + "%" : "—"}</td>
+              </tr>`;
+            })
+            .join("");
+
+    const bulkBar =
+      someChecked
+        ? `<div class="bulk-bar" style="margin-top:0.75rem">
+            <div class="bulk-bar-count">
+              <strong>${nChecked}</strong><span class="bulk-bar-count-label">selected</span>${
+                checkedTaskKeys.length !== nChecked
+                  ? `<span class="muted small bulk-bar-count-extra">(${checkedTaskKeys.length - nChecked} read-only skipped)</span>`
+                  : ""
+              }
+            </div>
+            <div class="bulk-group">
+              <label class="bulk-field">Status
+                <select id="bulk-task-status" ${busy || nChecked === 0 ? "disabled" : ""}>
+                  <option value="">—</option>
+                  <option value="NEEDS-ACTION">To do</option>
+                  <option value="IN-PROCESS">In progress</option>
+                  <option value="COMPLETED">Done</option>
+                  <option value="CANCELLED">Cancelled</option>
+                </select>
+              </label>
+              <button type="button" class="btn btn-small" data-action="bulk-task-status" ${busy || nChecked === 0 ? "disabled" : ""}>Apply status</button>
+            </div>
+            <div class="bulk-group">
+              <label class="bulk-field">Due
+                <input type="datetime-local" id="bulk-task-due" ${busy || nChecked === 0 ? "disabled" : ""} />
+              </label>
+              <button type="button" class="btn btn-small" data-action="bulk-task-due" ${busy || nChecked === 0 ? "disabled" : ""}>Apply due</button>
+              <button type="button" class="btn btn-small btn-ghost" data-action="bulk-task-clear-due" ${busy || nChecked === 0 ? "disabled" : ""} title="Clear due date">Clear due</button>
+            </div>
+            <div class="bulk-group">
+              <label class="bulk-field bulk-field-pct">%
+                <input type="number" id="bulk-task-percent" min="0" max="100" placeholder="0–100" ${busy || nChecked === 0 ? "disabled" : ""} />
+              </label>
+              <button type="button" class="btn btn-small" data-action="bulk-task-percent" ${busy || nChecked === 0 ? "disabled" : ""}>Apply %</button>
+            </div>
+            <div class="bulk-group bulk-group-end">
+              <button type="button" class="btn btn-small btn-danger" data-action="bulk-task-delete" ${busy || nChecked === 0 ? "disabled" : ""}>Delete</button>
+              <button type="button" class="btn btn-small btn-ghost" data-action="bulk-task-clear" ${busy ? "disabled" : ""}>Clear selection</button>
+            </div>
+          </div>`
+        : "";
+
+    const t = editingTask;
+    const calOpts = taskCalendars
+      .map(
+        (c) =>
+          `<option value="${c.id}" ${t && t.instanceId === c.id ? "selected" : ""}>${esc(c.displayname)}</option>`,
+      )
+      .join("");
+    const form =
+      t
+        ? `<div class="card">
+            ${infoTitle(creatingTask ? (t.parentUid ? "New subtask" : "New task") : "Edit task", "tasks")}
+            <form class="stack" data-form="task" style="margin-top:1rem">
+              ${
+                creatingTask
+                  ? `<label>Calendar
+                      <select name="instanceId" required ${taskCalendars.length === 0 ? "disabled" : ""}>
+                        <option value="">${taskCalendars.length ? "Select calendar…" : "No writable calendars"}</option>
+                        ${calOpts}
+                      </select>
+                    </label>`
+                  : `<p class="muted small">Calendar: <strong>${esc(t.calendarName)}</strong>${t.readOnly ? " · read-only" : ""}</p>`
+              }
+              <label>Title
+                <input type="text" name="summary" required maxlength="500" value="${esc(t.summary)}" ${t.readOnly && !creatingTask ? "readonly" : ""} />
+              </label>
+              <label>Description
+                <textarea name="description" rows="4" maxlength="20000" ${t.readOnly && !creatingTask ? "readonly" : ""}>${esc(t.description)}</textarea>
+              </label>
+              <label>Parent task
+                <select name="parentUid" ${t.readOnly && !creatingTask ? "disabled" : ""}>
+                  ${parentTaskOptions(t, creatingTask)}
+                </select>
+                <span class="muted small">Subtasks must use a parent on the same calendar (CalDAV RELATED-TO).</span>
+              </label>
+              <div class="form-grid form-grid-2">
+                <label>Status
+                  <select name="status" ${t.readOnly && !creatingTask ? "disabled" : ""}>
+                    ${["NEEDS-ACTION", "IN-PROCESS", "COMPLETED", "CANCELLED"]
+                      .map(
+                        (s) =>
+                          `<option value="${s}" ${t.status === s ? "selected" : ""}>${esc(statusLabel(s))}</option>`,
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <label>Due
+                  <input type="datetime-local" name="due" value="${esc(toLocalInputValue(t.due))}" ${t.readOnly && !creatingTask ? "readonly" : ""} />
+                </label>
+              </div>
+              <div class="form-grid form-grid-2">
+                <label>Priority (0–9)
+                  <input type="number" name="priority" min="0" max="9" value="${esc(String(t.priority || 0))}" ${t.readOnly && !creatingTask ? "readonly" : ""} />
+                </label>
+                <label>% complete
+                  <input type="number" name="percent" min="0" max="100" value="${esc(String(t.percent || 0))}" ${t.readOnly && !creatingTask ? "readonly" : ""} />
+                </label>
+              </div>
+              <div class="form-actions-row">
+                ${
+                  creatingTask || t.canWrite
+                    ? `<button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>${creatingTask ? "Create task" : "Save task"}</button>`
+                    : ""
+                }
+                ${
+                  !creatingTask && t.canWrite
+                    ? `<button type="button" class="btn btn-ghost" data-action="new-subtask" ${busy ? "disabled" : ""}>Add subtask</button>
+                       <button type="button" class="btn btn-danger" data-action="delete-task" ${busy ? "disabled" : ""}>Delete</button>`
+                    : creatingTask
+                      ? `<button type="button" class="btn btn-ghost" data-action="cancel-task">Cancel</button>`
+                      : ""
+                }
+              </div>
+            </form>
+          </div>`
+        : `<div class="card"><p class="muted">Select a task or click <strong>Add task</strong>.</p></div>`;
+
+    return `<div class="portal-grid portal-grid-items">
+      <section class="card contacts-main-card items-list-card">
+        ${infoTitle("Tasks", "tasks")}
+        <div class="contact-toolbar" style="margin-top:0.75rem">
+          <input type="search" data-action="task-search" placeholder="Search tasks…" value="${esc(taskSearch)}" aria-label="Search tasks" ${busy ? "disabled" : ""} />
+          <button type="button" class="btn btn-primary" data-action="new-task" ${busy || taskCalendars.length === 0 ? "disabled" : ""}>Add task</button>
+        </div>
+        ${bulkBar}
+        ${
+          taskCalendars.length === 0
+            ? `<p class="muted small" style="margin-top:0.75rem">No writable calendars with tasks (VTODO) enabled. Create a calendar under <strong>Calendar</strong> (system Tasks setting must be on).</p>`
+            : ""
+        }
+        <div class="contacts-table-wrap items-table-wrap" style="margin-top:0.75rem">
+          <table class="contacts-table">
+            <thead>
+              <tr>
+                <th class="col-task-check">
+                  <input type="checkbox" data-action="task-select-all" aria-label="Select all writable tasks"
+                    ${allWritableChecked ? "checked" : ""} ${writableKeys.length === 0 || busy ? "disabled" : ""} />
+                </th>
+                ${sortHeader("Title", "summary", taskSort, taskOrder, "task", "col-task-title")}
+                ${sortHeader("Status", "status", taskSort, taskOrder, "task", "col-task-status")}
+                ${sortHeader("Due", "due", taskSort, taskOrder, "task", "col-task-due")}
+                ${sortHeader("Calendar", "calendar", taskSort, taskOrder, "task", "col-task-cal")}
+                ${sortHeader("%", "percent", taskSort, taskOrder, "task", "col-task-pct")}
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="stack items-edit-panel">
+        ${form}
+      </section>
+    </div>`;
+  }
+
+  function renderNotesTab(): string {
+    const rows =
+      notes.length === 0
+        ? `<tr class="contacts-empty-row"><td colspan="3" class="muted">${
+            noteSearch ? "No notes match your search." : "No notes yet. Add one below."
+          }</td></tr>`
+        : notes
+            .map((n) => {
+              const key = itemKey(n.instanceId, n.uri);
+              const active = !creatingNote && key === selectedNoteKey ? " is-selected" : "";
+              const preview = (n.description || "").replace(/\s+/g, " ").slice(0, 80);
+              return `<tr class="contact-table-row${active}" data-action="select-note" data-instance="${n.instanceId}" data-uri="${esc(n.uri)}" tabindex="0" role="button">
+                <td class="col-note-title">
+                  <span class="contact-name-primary">${esc(n.summary || n.uri)}</span>
+                  ${preview ? `<span class="muted small contact-name-secondary">${esc(preview)}${n.description.length > 80 ? "…" : ""}</span>` : ""}
+                  ${n.readOnly ? '<span class="badge">read-only</span>' : ""}
+                </td>
+                <td class="col-note-date muted small">${esc(formatWhen(n.dtstart))}</td>
+                <td class="col-note-cal muted small">${esc(n.calendarName)}</td>
+              </tr>`;
+            })
+            .join("");
+
+    const n = editingNote;
+    const calOpts = noteCalendars
+      .map(
+        (c) =>
+          `<option value="${c.id}" ${n && n.instanceId === c.id ? "selected" : ""}>${esc(c.displayname)}</option>`,
+      )
+      .join("");
+    const form =
+      n
+        ? `<div class="card">
+            ${infoTitle(creatingNote ? "New note" : "Edit note", "notes")}
+            <form class="stack" data-form="note" style="margin-top:1rem">
+              ${
+                creatingNote
+                  ? `<label>Calendar
+                      <select name="instanceId" required ${noteCalendars.length === 0 ? "disabled" : ""}>
+                        <option value="">${noteCalendars.length ? "Select calendar…" : "No writable calendars"}</option>
+                        ${calOpts}
+                      </select>
+                    </label>`
+                  : `<p class="muted small">Calendar: <strong>${esc(n.calendarName)}</strong>${n.readOnly ? " · read-only" : ""}</p>`
+              }
+              <label>Title
+                <input type="text" name="summary" required maxlength="500" value="${esc(n.summary)}" ${n.readOnly && !creatingNote ? "readonly" : ""} />
+              </label>
+              <label>Date
+                <input type="datetime-local" name="dtstart" value="${esc(toLocalInputValue(n.dtstart))}" ${n.readOnly && !creatingNote ? "readonly" : ""} />
+              </label>
+              <label>Body
+                <textarea name="description" rows="8" maxlength="20000" ${n.readOnly && !creatingNote ? "readonly" : ""}>${esc(n.description)}</textarea>
+              </label>
+              <div class="form-actions-row">
+                ${
+                  creatingNote || n.canWrite
+                    ? `<button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>${creatingNote ? "Create note" : "Save note"}</button>`
+                    : ""
+                }
+                ${
+                  !creatingNote && n.canWrite
+                    ? `<button type="button" class="btn btn-danger" data-action="delete-note" ${busy ? "disabled" : ""}>Delete</button>`
+                    : creatingNote
+                      ? `<button type="button" class="btn btn-ghost" data-action="cancel-note">Cancel</button>`
+                      : ""
+                }
+              </div>
+            </form>
+          </div>`
+        : `<div class="card"><p class="muted">Select a note or click <strong>Add note</strong>.</p></div>`;
+
+    return `<div class="portal-grid portal-grid-items">
+      <section class="card contacts-main-card items-list-card">
+        ${infoTitle("Notes", "notes")}
+        <div class="contact-toolbar" style="margin-top:0.75rem">
+          <input type="search" data-action="note-search" placeholder="Search notes…" value="${esc(noteSearch)}" aria-label="Search notes" ${busy ? "disabled" : ""} />
+          <button type="button" class="btn btn-primary" data-action="new-note" ${busy || noteCalendars.length === 0 ? "disabled" : ""}>Add note</button>
+        </div>
+        ${
+          noteCalendars.length === 0
+            ? `<p class="muted small" style="margin-top:0.75rem">No writable calendars with notes (VJOURNAL) enabled. Enable Notes in Admin settings and ensure calendars include VJOURNAL.</p>`
+            : ""
+        }
+        <div class="contacts-table-wrap items-table-wrap" style="margin-top:0.75rem">
+          <table class="contacts-table">
+            <thead>
+              <tr>
+                ${sortHeader("Title", "summary", noteSort, noteOrder, "note", "col-note-title")}
+                ${sortHeader("Date", "dtstart", noteSort, noteOrder, "note", "col-note-date")}
+                ${sortHeader("Calendar", "calendar", noteSort, noteOrder, "note", "col-note-cal")}
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="stack items-edit-panel">
+        ${form}
+      </section>
+    </div>`;
   }
 
   /** Full re-render replaces DOM and would reset scroll; capture/restore so contact clicks stay put. */
@@ -1058,14 +1831,19 @@ export function mountApp(root: HTMLElement): void {
         void onAction(ev);
       });
     });
-    // Keyboard activation for contacts table rows
-    root.querySelectorAll<HTMLElement>("tr.contact-table-row[data-action]").forEach((row) => {
+    // Keyboard activation for contacts table rows and calendar list rows
+    root.querySelectorAll<HTMLElement>("tr.contact-table-row[data-action], .cal-row[data-action]").forEach((row) => {
       row.addEventListener("keydown", (ev: KeyboardEvent) => {
         if (ev.key === "Enter" || ev.key === " ") {
           ev.preventDefault();
           row.click();
         }
       });
+    });
+    const delConfirm = root.querySelector<HTMLInputElement>("#delete-cal-confirm");
+    const delSubmit = root.querySelector<HTMLButtonElement>("#delete-cal-submit");
+    delConfirm?.addEventListener("change", () => {
+      if (delSubmit) delSubmit.disabled = !delConfirm.checked || busy;
     });
     // Avatar photo 404 → initials (no inline onerror — CSP script-src 'self')
     root.querySelectorAll<HTMLImageElement>("img.contact-avatar[data-avatar-fallback]").forEach((img) => {
@@ -1125,6 +1903,44 @@ export function mountApp(root: HTMLElement): void {
       ev.preventDefault();
       void onSaveContact(contactForm);
     });
+    const taskForm = root.querySelector<HTMLFormElement>('[data-form="task"]');
+    taskForm?.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      void onSaveTask(taskForm);
+    });
+    // When calendar changes on create, refresh parent options for that calendar
+    if (taskForm) {
+      const calSelect = taskForm.querySelector<HTMLSelectElement>('select[name="instanceId"]');
+      calSelect?.addEventListener("change", () => {
+        if (!creatingTask || !editingTask) return;
+        const id = Number(calSelect.value);
+        if (!Number.isFinite(id) || id <= 0) return;
+        const fd = new FormData(taskForm);
+        const dueLocal = String(fd.get("due") ?? "").trim();
+        editingTask = {
+          ...editingTask,
+          instanceId: id,
+          // Parent must be on the same calendar — clear if mismatch
+          parentUid:
+            editingTask.parentUid &&
+            tasks.some((x) => x.uid === editingTask!.parentUid && x.instanceId === id)
+              ? editingTask.parentUid
+              : null,
+          summary: String(fd.get("summary") ?? ""),
+          description: String(fd.get("description") ?? ""),
+          status: String(fd.get("status") ?? "NEEDS-ACTION"),
+          due: dueLocal ? new Date(dueLocal).toISOString() : null,
+          priority: Number(fd.get("priority") ?? 0),
+          percent: Number(fd.get("percent") ?? 0),
+        };
+        render();
+      });
+    }
+    const noteForm = root.querySelector<HTMLFormElement>('[data-form="note"]');
+    noteForm?.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      void onSaveNote(noteForm);
+    });
     const searchInput = root.querySelector<HTMLInputElement>('input[data-action="contact-search"]');
     searchInput?.addEventListener("input", () => {
       if (searchTimer) clearTimeout(searchTimer);
@@ -1142,9 +1958,272 @@ export function mountApp(root: HTMLElement): void {
         })();
       }, 250);
     });
+    const taskSearchInput = root.querySelector<HTMLInputElement>('input[data-action="task-search"]');
+    taskSearchInput?.addEventListener("input", () => {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        taskSearch = taskSearchInput.value;
+        void (async () => {
+          try {
+            await loadTasks();
+            render();
+          } catch (e) {
+            setFlash("error", e instanceof Error ? e.message : "Search failed");
+            render();
+          }
+        })();
+      }, 250);
+    });
+    const noteSearchInput = root.querySelector<HTMLInputElement>('input[data-action="note-search"]');
+    noteSearchInput?.addEventListener("input", () => {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        noteSearch = noteSearchInput.value;
+        void (async () => {
+          try {
+            await loadNotes();
+            render();
+          } catch (e) {
+            setFlash("error", e instanceof Error ? e.message : "Search failed");
+            render();
+          }
+        })();
+      }, 250);
+    });
     bindImportInput();
     bindHolidaysToggle();
     bindContactPhotoInput();
+  }
+
+  async function runBulkTaskAction(
+    action:
+      | "bulk-task-status"
+      | "bulk-task-due"
+      | "bulk-task-clear-due"
+      | "bulk-task-percent"
+      | "bulk-task-delete",
+  ) {
+    const selected = writableCheckedTasks();
+    if (selected.length === 0) {
+      setFlash("error", "No writable tasks selected");
+      render();
+      return;
+    }
+    const items = selected.map((t) => ({ instanceId: t.instanceId, uri: t.uri }));
+
+    if (action === "bulk-task-delete") {
+      if (
+        !confirm(
+          `Delete ${selected.length} task${selected.length === 1 ? "" : "s"}? CalDAV clients will sync the removal.`,
+        )
+      ) {
+        return;
+      }
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        const res = await api.bulkTasks({ op: "delete", items });
+        checkedTaskKeys = [];
+        if (selectedTaskKey && selected.some((t) => itemKey(t.instanceId, t.uri) === selectedTaskKey)) {
+          selectedTaskKey = null;
+          editingTask = null;
+          creatingTask = false;
+        }
+        await loadTasks();
+        if (res.failed > 0) {
+          setFlash(
+            "error",
+            `Deleted ${res.ok}, failed ${res.failed}${res.errors[0] ? `: ${res.errors[0]}` : ""}`,
+          );
+        } else {
+          setFlash("success", `Deleted ${res.ok} task${res.ok === 1 ? "" : "s"}`);
+        }
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Bulk delete failed");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+
+    let fields: { status?: string; due?: string | null; percent?: number } = {};
+    if (action === "bulk-task-status") {
+      const sel = root.querySelector<HTMLSelectElement>("#bulk-task-status");
+      const status = sel?.value?.trim() ?? "";
+      if (!status) {
+        setFlash("error", "Choose a status to apply");
+        render();
+        return;
+      }
+      fields = { status };
+    } else if (action === "bulk-task-due") {
+      const input = root.querySelector<HTMLInputElement>("#bulk-task-due");
+      const raw = input?.value?.trim() ?? "";
+      if (!raw) {
+        setFlash("error", "Choose a due date to apply");
+        render();
+        return;
+      }
+      fields = { due: new Date(raw).toISOString() };
+    } else if (action === "bulk-task-clear-due") {
+      fields = { due: null };
+    } else if (action === "bulk-task-percent") {
+      const input = root.querySelector<HTMLInputElement>("#bulk-task-percent");
+      const raw = input?.value?.trim() ?? "";
+      if (raw === "") {
+        setFlash("error", "Enter a percent complete (0–100)");
+        render();
+        return;
+      }
+      const pct = Number(raw);
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+        setFlash("error", "Percent must be between 0 and 100");
+        render();
+        return;
+      }
+      fields = { percent: Math.round(pct) };
+    }
+
+    busy = true;
+    clearFlash();
+    render();
+    try {
+      const res = await api.bulkTasks({ op: "update", items, fields });
+      await loadTasks();
+      // Refresh open editor if it was in the bulk set
+      if (editingTask && !creatingTask) {
+        const key = itemKey(editingTask.instanceId, editingTask.uri);
+        const refreshed = tasks.find((x) => itemKey(x.instanceId, x.uri) === key);
+        if (refreshed) editingTask = { ...refreshed };
+      }
+      const label =
+        action === "bulk-task-status"
+          ? "status"
+          : action === "bulk-task-due"
+            ? "due date"
+            : action === "bulk-task-clear-due"
+              ? "due date"
+              : "percent";
+      if (res.failed > 0) {
+        setFlash(
+          "error",
+          `Updated ${label} on ${res.ok}, failed ${res.failed}${res.errors[0] ? `: ${res.errors[0]}` : ""}`,
+        );
+      } else {
+        setFlash(
+          "success",
+          `Updated ${label} on ${res.ok} task${res.ok === 1 ? "" : "s"}`,
+        );
+      }
+    } catch (e) {
+      setFlash("error", e instanceof Error ? e.message : "Bulk update failed");
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function onSaveTask(form: HTMLFormElement) {
+    const fd = new FormData(form);
+    const summary = String(fd.get("summary") ?? "").trim();
+    const description = String(fd.get("description") ?? "").trim();
+    const status = String(fd.get("status") ?? "NEEDS-ACTION");
+    const dueLocal = String(fd.get("due") ?? "").trim();
+    const due = dueLocal ? new Date(dueLocal).toISOString() : null;
+    const priority = Number(fd.get("priority") ?? 0);
+    const percent = Number(fd.get("percent") ?? 0);
+    const parentRaw = String(fd.get("parentUid") ?? "").trim();
+    const parentUid = parentRaw === "" ? null : parentRaw;
+    busy = true;
+    clearFlash();
+    render();
+    try {
+      if (creatingTask) {
+        const instanceId = Number(fd.get("instanceId"));
+        if (!Number.isFinite(instanceId) || instanceId <= 0) {
+          throw new Error("Select a calendar");
+        }
+        const res = await api.createTask({
+          instanceId,
+          summary,
+          description,
+          status,
+          due,
+          priority,
+          percent,
+          parentUid,
+        });
+        creatingTask = false;
+        selectedTaskKey = itemKey(res.task.instanceId, res.task.uri);
+        editingTask = res.task;
+        setFlash("success", parentUid ? "Subtask created" : "Task created");
+      } else if (editingTask) {
+        const res = await api.updateTask(editingTask.instanceId, editingTask.uri, {
+          summary,
+          description,
+          status,
+          due,
+          priority,
+          percent,
+          parentUid,
+        });
+        editingTask = res.task;
+        selectedTaskKey = itemKey(res.task.instanceId, res.task.uri);
+        setFlash("success", "Task saved");
+      }
+      await loadTasks();
+    } catch (e) {
+      setFlash("error", e instanceof Error ? e.message : "Save failed");
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function onSaveNote(form: HTMLFormElement) {
+    const fd = new FormData(form);
+    const summary = String(fd.get("summary") ?? "").trim();
+    const description = String(fd.get("description") ?? "").trim();
+    const dtLocal = String(fd.get("dtstart") ?? "").trim();
+    const dtstart = dtLocal ? new Date(dtLocal).toISOString() : null;
+    busy = true;
+    clearFlash();
+    render();
+    try {
+      if (creatingNote) {
+        const instanceId = Number(fd.get("instanceId"));
+        if (!Number.isFinite(instanceId) || instanceId <= 0) {
+          throw new Error("Select a calendar");
+        }
+        const res = await api.createNote({
+          instanceId,
+          summary,
+          description,
+          dtstart,
+        });
+        creatingNote = false;
+        selectedNoteKey = itemKey(res.note.instanceId, res.note.uri);
+        editingNote = res.note;
+        setFlash("success", "Note created");
+      } else if (editingNote) {
+        const res = await api.updateNote(editingNote.instanceId, editingNote.uri, {
+          summary,
+          description,
+          dtstart,
+        });
+        editingNote = res.note;
+        selectedNoteKey = itemKey(res.note.instanceId, res.note.uri);
+        setFlash("success", "Note saved");
+      }
+      await loadNotes();
+    } catch (e) {
+      setFlash("error", e instanceof Error ? e.message : "Save failed");
+    } finally {
+      busy = false;
+      render();
+    }
   }
 
   function bindContactPhotoInput() {
@@ -1227,6 +2306,7 @@ export function mountApp(root: HTMLElement): void {
     const fd = new FormData(form);
     const username = String(fd.get("username") ?? "");
     const access = String(fd.get("access") ?? "read") as "read" | "readwrite";
+    calModalOpen = true;
     busy = true;
     clearFlash();
     render();
@@ -1257,8 +2337,11 @@ export function mountApp(root: HTMLElement): void {
         description,
         color,
       });
+      calModalOpen = true;
       await loadHome();
       selectedId = res.calendar.id;
+      await loadShares(selectedId);
+      await loadMonthEvents();
       setFlash("success", "Calendar updated");
     } catch (e) {
       setFlash("error", e instanceof Error ? e.message : "Update failed");
@@ -1359,9 +2442,111 @@ export function mountApp(root: HTMLElement): void {
       clearFlash();
       render();
       try {
-        await loadShares(id);
+        await loadMonthEvents();
       } catch (e) {
-        setFlash("error", e instanceof Error ? e.message : "Failed to load shares");
+        setFlash("error", e instanceof Error ? e.message : "Failed to load calendar");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "edit-cal") {
+      const id = Number(t.dataset.id);
+      if (!Number.isFinite(id)) return;
+      const cal = calendars.find((c) => c.id === id && c.canShare);
+      if (!cal) return;
+      selectedId = id;
+      calModalOpen = true;
+      deleteConfirmId = null;
+      lastImportResult = null;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        await loadShares(id);
+        await loadMonthEvents();
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Failed to open calendar");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "close-cal-modal") {
+      calModalOpen = false;
+      render();
+      return;
+    }
+    if (action === "delete-cal") {
+      const id = Number(t.dataset.id);
+      if (!Number.isFinite(id)) return;
+      const cal = calendars.find((c) => c.id === id && c.canShare);
+      if (!cal) return;
+      deleteConfirmId = id;
+      calModalOpen = false;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "cancel-delete-cal") {
+      deleteConfirmId = null;
+      render();
+      return;
+    }
+    if (action === "confirm-delete-cal") {
+      const id = Number(t.dataset.id);
+      const cb = root.querySelector<HTMLInputElement>("#delete-cal-confirm");
+      if (!Number.isFinite(id) || !cb?.checked) return;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        await api.deleteCalendar(id);
+        if (selectedId === id) selectedId = null;
+        deleteConfirmId = null;
+        calModalOpen = false;
+        shares = [];
+        monthEvents = [];
+        await loadHome();
+        if (selectedId === null) {
+          const def = pickDefaultCalendar();
+          if (def) {
+            selectedId = def.id;
+            await loadMonthEvents();
+          }
+        }
+        setFlash("success", "Calendar deleted");
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Delete failed");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "month-today") {
+      const n = new Date();
+      monthCursor = { y: n.getFullYear(), m: n.getMonth() };
+      busy = true;
+      render();
+      try {
+        await loadMonthEvents();
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "month-prev" || action === "month-next") {
+      const delta = action === "month-prev" ? -1 : 1;
+      const d = new Date(monthCursor.y, monthCursor.m + delta, 1);
+      monthCursor = { y: d.getFullYear(), m: d.getMonth() };
+      busy = true;
+      render();
+      try {
+        await loadMonthEvents();
       } finally {
         busy = false;
         render();
@@ -1377,25 +2562,277 @@ export function mountApp(root: HTMLElement): void {
       closeInfoModal();
       return;
     }
+    if (action === "flash-close") {
+      clearFlash();
+      render();
+      return;
+    }
     if (action === "tab") {
       const tab = t.dataset.tab as TabId | undefined;
-      if (tab === "calendars" || tab === "contacts") {
+      if (tab === "calendars" || tab === "contacts" || tab === "tasks" || tab === "notes") {
         activeTab = tab;
+        if (tab !== "calendars") {
+          calModalOpen = false;
+          deleteConfirmId = null;
+        }
         clearFlash();
-        if (tab === "contacts" && selectedAbId !== null) {
-          busy = true;
-          render();
-          try {
+        busy = true;
+        render();
+        try {
+          if (tab === "contacts" && selectedAbId !== null) {
             await loadContacts(selectedAbId);
-          } catch (e) {
-            setFlash("error", e instanceof Error ? e.message : "Failed to load contacts");
-          } finally {
-            busy = false;
-            render();
+          } else if (tab === "calendars") {
+            await loadMonthEvents();
+          } else if (tab === "tasks") {
+            await loadTasks();
+          } else if (tab === "notes") {
+            await loadNotes();
           }
-        } else {
+        } catch (e) {
+          setFlash("error", e instanceof Error ? e.message : "Failed to load");
+        } finally {
+          busy = false;
           render();
         }
+      }
+      return;
+    }
+    if (action === "sort-task" || action === "sort-note") {
+      const col = t.dataset.sort || "";
+      if (!col) return;
+      if (action === "sort-task") {
+        if (taskSort === col) taskOrder = taskOrder === "asc" ? "desc" : "asc";
+        else {
+          taskSort = col;
+          taskOrder = col === "due" || col === "summary" ? "asc" : "desc";
+        }
+        busy = true;
+        render();
+        try {
+          await loadTasks();
+        } catch (e) {
+          setFlash("error", e instanceof Error ? e.message : "Sort failed");
+        } finally {
+          busy = false;
+          render();
+        }
+      } else {
+        if (noteSort === col) noteOrder = noteOrder === "asc" ? "desc" : "asc";
+        else {
+          noteSort = col;
+          noteOrder = "asc";
+        }
+        busy = true;
+        render();
+        try {
+          await loadNotes();
+        } catch (e) {
+          setFlash("error", e instanceof Error ? e.message : "Sort failed");
+        } finally {
+          busy = false;
+          render();
+        }
+      }
+      return;
+    }
+    if (action === "select-task") {
+      // Ignore clicks on the checkbox cell
+      if ((ev.target as HTMLElement).closest("[data-stop-row], .task-check")) return;
+      const instanceId = Number(t.dataset.instance);
+      const uri = t.dataset.uri ?? "";
+      if (!Number.isFinite(instanceId) || !uri) return;
+      const found = tasks.find((x) => x.instanceId === instanceId && x.uri === uri) ?? null;
+      creatingTask = false;
+      selectedTaskKey = itemKey(instanceId, uri);
+      editingTask = found ? { ...found } : null;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "task-check") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const instanceId = Number(t.dataset.instance);
+      const uri = t.dataset.uri ?? "";
+      if (!Number.isFinite(instanceId) || !uri) return;
+      const key = itemKey(instanceId, uri);
+      const task = tasks.find((x) => itemKey(x.instanceId, x.uri) === key);
+      if (!task || !task.canWrite || task.readOnly) return;
+      if (checkedTaskKeys.includes(key)) {
+        checkedTaskKeys = checkedTaskKeys.filter((k) => k !== key);
+      } else {
+        checkedTaskKeys = [...checkedTaskKeys, key];
+      }
+      render();
+      return;
+    }
+    if (action === "task-select-all") {
+      ev.preventDefault();
+      const writable = tasks.filter((x) => x.canWrite && !x.readOnly);
+      const allOn =
+        writable.length > 0 &&
+        writable.every((x) => checkedTaskKeys.includes(itemKey(x.instanceId, x.uri)));
+      if (allOn) {
+        checkedTaskKeys = [];
+      } else {
+        checkedTaskKeys = writable.map((x) => itemKey(x.instanceId, x.uri));
+      }
+      render();
+      return;
+    }
+    if (action === "bulk-task-clear") {
+      checkedTaskKeys = [];
+      render();
+      return;
+    }
+    if (
+      action === "bulk-task-status" ||
+      action === "bulk-task-due" ||
+      action === "bulk-task-clear-due" ||
+      action === "bulk-task-percent" ||
+      action === "bulk-task-delete"
+    ) {
+      void runBulkTaskAction(action);
+      return;
+    }
+    if (action === "select-note") {
+      const instanceId = Number(t.dataset.instance);
+      const uri = t.dataset.uri ?? "";
+      if (!Number.isFinite(instanceId) || !uri) return;
+      const found = notes.find((x) => x.instanceId === instanceId && x.uri === uri) ?? null;
+      creatingNote = false;
+      selectedNoteKey = itemKey(instanceId, uri);
+      editingNote = found ? { ...found } : null;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "new-task") {
+      creatingTask = true;
+      selectedTaskKey = null;
+      editingTask = {
+        uri: "",
+        instanceId: taskCalendars[0]?.id ?? 0,
+        calendarId: 0,
+        calendarName: "",
+        calendarUri: "",
+        uid: "",
+        parentUid: null,
+        summary: "",
+        description: "",
+        status: "NEEDS-ACTION",
+        due: null,
+        priority: 0,
+        percent: 0,
+        completed: null,
+        lastmodified: 0,
+        readOnly: false,
+        canWrite: true,
+      };
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "new-subtask") {
+      if (!editingTask || creatingTask || !editingTask.uid) return;
+      if (!editingTask.canWrite) return;
+      const parent = editingTask;
+      creatingTask = true;
+      selectedTaskKey = null;
+      editingTask = {
+        uri: "",
+        instanceId: parent.instanceId,
+        calendarId: parent.calendarId,
+        calendarName: parent.calendarName,
+        calendarUri: parent.calendarUri,
+        uid: "",
+        parentUid: parent.uid,
+        summary: "",
+        description: "",
+        status: "NEEDS-ACTION",
+        due: null,
+        priority: 0,
+        percent: 0,
+        completed: null,
+        lastmodified: 0,
+        readOnly: false,
+        canWrite: true,
+      };
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "new-note") {
+      creatingNote = true;
+      selectedNoteKey = null;
+      editingNote = {
+        uri: "",
+        instanceId: noteCalendars[0]?.id ?? 0,
+        calendarId: 0,
+        calendarName: "",
+        calendarUri: "",
+        summary: "",
+        description: "",
+        dtstart: new Date().toISOString(),
+        lastmodified: 0,
+        readOnly: false,
+        canWrite: true,
+      };
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "cancel-task") {
+      creatingTask = false;
+      editingTask = null;
+      selectedTaskKey = null;
+      render();
+      return;
+    }
+    if (action === "cancel-note") {
+      creatingNote = false;
+      editingNote = null;
+      selectedNoteKey = null;
+      render();
+      return;
+    }
+    if (action === "delete-task") {
+      if (!editingTask || creatingTask) return;
+      if (!confirm("Delete this task? CalDAV clients will sync the removal.")) return;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        await api.deleteTask(editingTask.instanceId, editingTask.uri);
+        selectedTaskKey = null;
+        editingTask = null;
+        await loadTasks();
+        setFlash("success", "Task deleted");
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Delete failed");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "delete-note") {
+      if (!editingNote || creatingNote) return;
+      if (!confirm("Delete this note? CalDAV clients will sync the removal.")) return;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        await api.deleteNote(editingNote.instanceId, editingNote.uri);
+        selectedNoteKey = null;
+        editingNote = null;
+        await loadNotes();
+        setFlash("success", "Note deleted");
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Delete failed");
+      } finally {
+        busy = false;
+        render();
       }
       return;
     }
@@ -1595,6 +3032,7 @@ export function mountApp(root: HTMLElement): void {
       const href = t.dataset.href ?? "";
       if (!href || selectedId === null) return;
       if (!confirm("Revoke access for this user?")) return;
+      calModalOpen = true;
       busy = true;
       clearFlash();
       render();
@@ -1612,6 +3050,7 @@ export function mountApp(root: HTMLElement): void {
     }
     if (action === "export-cal") {
       if (selectedId === null) return;
+      calModalOpen = true;
       busy = true;
       clearFlash();
       render();
@@ -1909,6 +3348,7 @@ export function mountApp(root: HTMLElement): void {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    calModalOpen = true;
     busy = true;
     clearFlash();
     lastImportResult = null;
@@ -1918,6 +3358,7 @@ export function mountApp(root: HTMLElement): void {
       const res = await api.importCalendar(selectedId, ics);
       const detail = formatImportResult(res);
       lastImportResult = { ok: true, message: detail };
+      await loadMonthEvents();
       setFlash(
         "success",
         `Import finished for “${file.name}”: ${detail}.`,

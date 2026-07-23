@@ -10,8 +10,11 @@ to the viewport bottom).
 
 | Tab | Features |
 |-----|----------|
-| **My Calendars** | Create/edit, holidays, read-only (also enforced on CalDAV), share, import/export `.ics` |
-| **My Contacts** | Address books (create/rename/delete), contact table/search, per-contact CRUD, multi email/phone, photos, Unicode custom fields, import/export `.vcf` |
+| **Calendar** | Create/edit, holidays, read-only (also enforced on CalDAV), share, import/export `.ics` |
+| **Contacts** | Address books (create/rename/delete), contact table/search, per-contact CRUD, multi email/phone, photos, Unicode custom fields, import/export `.vcf` |
+| **Calendar** | Owned list with Edit (details/share modal), Delete (confirm checkbox), month grid of VEVENT; create/share/import/export |
+| **Tasks** | CalDAV `VTODO` list (sortable), subtasks via `RELATED-TO;RELTYPE=PARENT`, create/edit/delete on writable calendars |
+| **Notes** | CalDAV `VJOURNAL` list (sortable), create/edit/delete on writable calendars |
 
 Section help lives under **(i)** info modals.
 

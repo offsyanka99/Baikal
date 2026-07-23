@@ -17,6 +17,9 @@ class App {
     /** @var ContactService */
     private $contacts;
 
+    /** @var CalendarItemService */
+    private $items;
+
     /** @var array<string, mixed>|null Cached JSON body (php://input is one-shot) */
     private $jsonBodyCache = null;
 
@@ -32,6 +35,7 @@ class App {
         $this->auth = new Auth($pdo, $realm, $sessionMax);
         $this->shares = new ShareService($pdo);
         $this->contacts = new ContactService($pdo);
+        $this->items = new CalendarItemService($pdo);
     }
 
     /**
@@ -198,6 +202,25 @@ class App {
             return ['calendar' => $cal];
         }
 
+        // DELETE /calendars/{id} — permanently remove owned calendar
+        if (preg_match('#^/calendars/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            $instanceId = (int) $m[1];
+            $this->shares->deleteCalendar($username, $instanceId);
+
+            return ['ok' => true];
+        }
+
+        // GET /calendars/{id}/events?from=YYYY-MM-DD&to=YYYY-MM-DD — month view
+        if ($method === 'GET' && preg_match('#^/calendars/(\d+)/events$#', $path, $m)) {
+            $instanceId = (int) $m[1];
+            $from = isset($_GET['from']) ? (string) $_GET['from'] : '';
+            $to = isset($_GET['to']) ? (string) $_GET['to'] : '';
+
+            return [
+                'events' => $this->shares->listEvents($username, $instanceId, $from, $to),
+            ];
+        }
+
         // POST /calendars/{id}/import — ICS body (JSON {ics} or raw text/calendar)
         if ($method === 'POST' && preg_match('#^/calendars/(\d+)/import$#', $path, $m)) {
             $instanceId = (int) $m[1];
@@ -305,7 +328,74 @@ class App {
             }
         }
 
+        // --- Tasks (VTODO) / Notes (VJOURNAL) ---
+        $itemRoutes = $this->dispatchItemRoutes($method, $path, $username);
+        if ($itemRoutes !== null) {
+            return $itemRoutes;
+        }
+
         throw new ApiException('Not found', 404);
+    }
+
+    /**
+     * @return array<string, mixed>|list<mixed>|null
+     */
+    private function dispatchItemRoutes(string $method, string $path, string $username) {
+        foreach (['tasks' => CalendarItemService::KIND_TASK, 'notes' => CalendarItemService::KIND_NOTE] as $seg => $kind) {
+            if ($method === 'GET' && $path === '/' . $seg) {
+                $q = isset($_GET['q']) ? (string) $_GET['q'] : '';
+                $sort = isset($_GET['sort']) ? (string) $_GET['sort'] : '';
+                $order = isset($_GET['order']) ? (string) $_GET['order'] : 'asc';
+
+                return [
+                    $seg        => $this->items->listItems($username, $kind, $q, $sort, $order),
+                    'calendars' => $this->items->writableCalendars($username, $kind),
+                ];
+            }
+            if ($method === 'POST' && $path === '/' . $seg) {
+                $body = $this->jsonBody();
+                $item = $this->items->createItem($username, $kind, $body);
+
+                return [rtrim($seg, 's') => $item]; // task / note
+            }
+            // POST /tasks/bulk — multi select update/delete
+            if ($method === 'POST' && $path === '/' . $seg . '/bulk') {
+                $body = $this->jsonBody();
+                $op = (string) ($body['op'] ?? '');
+                $items = $body['items'] ?? [];
+                if (!is_array($items)) {
+                    throw new ApiException('items must be an array', 400);
+                }
+                $fields = $body['fields'] ?? [];
+                if (!is_array($fields)) {
+                    $fields = [];
+                }
+
+                return $this->items->bulkItems($username, $kind, $op, $items, $fields);
+            }
+            // /tasks/{instanceId}/{uri}
+            if (preg_match('#^/' . $seg . '/(\d+)/([^/]+)$#', $path, $m)) {
+                $instanceId = (int) $m[1];
+                $uri = rawurldecode($m[2]);
+                $key = rtrim($seg, 's');
+                if ($method === 'GET') {
+                    return [$key => $this->items->getItem($username, $kind, $instanceId, $uri)];
+                }
+                if ($method === 'PATCH' || $method === 'PUT') {
+                    $body = $this->jsonBody();
+                    $item = $this->items->updateItem($username, $kind, $instanceId, $uri, $body);
+
+                    return [$key => $item];
+                }
+                if ($method === 'DELETE') {
+                    $this->items->deleteItem($username, $kind, $instanceId, $uri);
+
+                    return ['ok' => true];
+                }
+            }
+        }
+
+        return null;
     }
 
     private function readIcsPayload(): string {

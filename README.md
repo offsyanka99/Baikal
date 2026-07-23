@@ -18,8 +18,9 @@ Fork of Baïkal with:
 - `/health.php` and `/info.php` for monitoring
 - CalDAV **calendar-timezone** dual-format fix (plain Olson id + VTIMEZONE) for Home Assistant expand queries
 - **User portal** (`/portal/`) — TypeScript SPA + PHP API:
-  - **My Calendars** tab: create/edit (name, color, description), holidays calendars, read-only flag (enforced on CalDAV), import/export `.ics`, share
-  - **My Contacts** tab: address books (CRUD), contact list/search/edit, multi email/phone, photos, import/export `.vcf`
+  - **Calendar** tab: owned list (Edit / Delete), month event grid, holidays/read-only, details/share/import/export in modal
+  - **Contacts** tab: address books (CRUD), contact list/search/edit, multi email/phone, photos, import/export `.vcf`
+  - **Tasks** / **Notes** tabs: CalDAV `VTODO` / `VJOURNAL` (bulk actions on tasks)
   - Info **(i)** modals instead of long inline help
 - `/dav.php/` kept as classic backup browser and CalDAV/CardDAV endpoint
 
@@ -63,7 +64,7 @@ Endpoints
 
 | Path | Use |
 |------|-----|
-| `/portal/` | **User portal** — calendars + contacts |
+| `/portal/` | **User portal** — calendars, contacts, tasks, notes |
 | `/dav.php/` | CalDAV + CardDAV (clients + classic WebDAV browser) |
 | `/admin/` | Web admin |
 | `/api/` | Portal JSON API (session cookie) |
@@ -75,12 +76,17 @@ User portal
 
 1. Admin creates DAV users under `/admin/`.
 2. Open **`/portal/`**, sign in with **DAV** credentials.
-3. **My Calendars:** create/edit calendars, holidays, share, import/export `.ics`.
-4. **My Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf`.
+3. **Calendar:** owned list, month view, Edit modal (details, share, import/export `.ics`).
+4. **Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf`.
+5. **Tasks** / **Notes:** manage `VTODO` / `VJOURNAL` on your calendars.
 
-![User portal — My Calendars](docs/images/portal-my-calendars.jpg)
+![User portal — Calendar](docs/images/portal-my-calendars.jpg)
 
-![User portal — My Contacts](docs/images/portal-my-contacts.jpg)
+![User portal — Contacts](docs/images/portal-my-contacts.jpg)
+
+![User portal — Tasks](docs/images/portal-tasks.jpg)
+
+![User portal — Notes](docs/images/portal-notes.jpg)
 
 More detail: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#user-portal).  
 `/dav.php/` remains available as the original sabre browser (and for all CalDAV/CardDAV clients).
@@ -113,7 +119,8 @@ Changelog (fork)
 - **ReadOnlyPlugin**: portal read-only calendars enforced on CalDAV (`PUT`/`DELETE`/… → 403)
 - Portal security: login rate limit, session idle timeout, CSRF + same-origin, import quotas, UTF-8-safe API JSON
 - Docker: `php8.2-gd`, CSP headers; production portal builds without source maps
-- Docs: updated contacts screenshot and deployment notes
+- Calendar month grid, Edit/Delete + details/share modal; Tasks/Notes tabs; bulk task actions
+- Docs: updated Calendar, Tasks, Notes screenshots and deployment notes
 
 ### 0.11.1-fork.2
 

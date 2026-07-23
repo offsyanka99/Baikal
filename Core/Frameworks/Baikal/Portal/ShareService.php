@@ -124,6 +124,12 @@ class ShareService {
         if ($color !== '') {
             $properties['{http://apple.com/ns/ical/}calendar-color'] = $color;
         }
+        // Respect system Tasks/Notes flags for supported components (CalDAV clients)
+        $compList = \Baikal\Core\Tools::defaultCalendarComponents();
+        $properties['{urn:ietf:params:xml:ns:caldav}supported-calendar-component-set'] =
+            new \Sabre\CalDAV\Xml\Property\SupportedCalendarComponentSet(
+                array_values(array_filter(explode(',', $compList)))
+            );
 
         $ids = $this->backend->createCalendar('principals/' . $username, $uri, $properties);
         $instanceId = is_array($ids) ? (int) $ids[1] : 0;
@@ -161,7 +167,7 @@ class ShareService {
             'access'          => 'owner',
             'accessCode'      => SharingPlugin::ACCESS_SHAREDOWNER,
             'canShare'        => true,
-            'components'      => 'VEVENT,VTODO',
+            'components'      => \Baikal\Core\Tools::defaultCalendarComponents(),
             'readOnly'        => $readOnly,
             'holidaysCountry' => $holidays ? $holidayCountry : null,
             'holidayImport'   => $holidayImport,
@@ -219,6 +225,144 @@ class ShareService {
         }
 
         throw new ApiException('Calendar updated but could not be reloaded', 500);
+    }
+
+    /**
+     * Permanently delete an owned calendar (and all objects / share instances).
+     */
+    public function deleteCalendar(string $username, int $instanceId): void {
+        $calId = $this->requireOwnedCalendarId($username, $instanceId);
+        // sabre only fully wipes when access is SHAREDOWNER; NOTSHARED would orphan data
+        $stmt = $this->pdo->prepare('SELECT access FROM calendarinstances WHERE id = ?');
+        $stmt->execute([$instanceId]);
+        $access = (int) $stmt->fetchColumn();
+        if ($access === SharingPlugin::ACCESS_NOTSHARED) {
+            $upd = $this->pdo->prepare('UPDATE calendarinstances SET access = ? WHERE id = ?');
+            $upd->execute([SharingPlugin::ACCESS_SHAREDOWNER, $instanceId]);
+        }
+        $this->backend->deleteCalendar($calId);
+        $this->meta->remove($instanceId);
+    }
+
+    /**
+     * List VEVENT occurrences in [from, to] (inclusive, YYYY-MM-DD) for month view.
+     * Expands RRULE within the range. Caps at 500 events.
+     *
+     * @return list<array{uid: string, uri: string, summary: string, start: string, end: string|null, allDay: bool}>
+     */
+    public function listEvents(string $username, int $instanceId, string $from, string $to): array {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
+            throw new ApiException('from and to must be YYYY-MM-DD', 400);
+        }
+        try {
+            $start = new \DateTimeImmutable($from . ' 00:00:00', new \DateTimeZone('UTC'));
+            $end = new \DateTimeImmutable($to . ' 23:59:59', new \DateTimeZone('UTC'));
+        } catch (\Throwable $e) {
+            throw new ApiException('Invalid date range', 400);
+        }
+        if ($end < $start) {
+            throw new ApiException('to must be on or after from', 400);
+        }
+        if ($end->getTimestamp() - $start->getTimestamp() > 100 * 86400) {
+            throw new ApiException('Date range too large (max ~3 months)', 400);
+        }
+
+        $calId = $this->requireCalendarAccess($username, $instanceId, false);
+        $calendarPk = (int) $calId[0];
+        $fromTs = $start->getTimestamp();
+        $toTs = $end->getTimestamp();
+
+        $stmt = $this->pdo->prepare(
+            'SELECT uri, calendardata, uid
+             FROM calendarobjects
+             WHERE calendarid = ?
+               AND UPPER(componenttype) = ?
+               AND (firstoccurence IS NULL OR firstoccurence <= ?)
+               AND (lastoccurence IS NULL OR lastoccurence >= ?)'
+        );
+        $stmt->execute([$calendarPk, 'VEVENT', $toTs, $fromTs]);
+
+        $events = [];
+        $max = 500;
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            if (count($events) >= $max) {
+                break;
+            }
+            $data = $row['calendardata'] ?? '';
+            if (is_resource($data)) {
+                $data = stream_get_contents($data);
+            }
+            if (!is_string($data) || trim($data) === '') {
+                continue;
+            }
+            try {
+                $vcal = Reader::read($data, Reader::OPTION_FORGIVING);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            if (!$vcal instanceof VCalendar) {
+                continue;
+            }
+            $uri = (string) ($row['uri'] ?? '');
+            $fallbackUid = (string) ($row['uid'] ?? '');
+            try {
+                $expanded = $vcal->expand(
+                    new \DateTime($from . ' 00:00:00', new \DateTimeZone('UTC')),
+                    new \DateTime($to . ' 23:59:59', new \DateTimeZone('UTC'))
+                );
+            } catch (\Throwable $e) {
+                $expanded = $vcal;
+            }
+            foreach ($expanded->getComponents() as $comp) {
+                if (strtoupper($comp->name) !== 'VEVENT') {
+                    continue;
+                }
+                if (count($events) >= $max) {
+                    break 2;
+                }
+                if (!isset($comp->DTSTART)) {
+                    continue;
+                }
+                try {
+                    $dtStart = $comp->DTSTART;
+                    $allDay = !$dtStart->hasTime();
+                    $startDt = $dtStart->getDateTime();
+                    $startStr = $allDay ? $startDt->format('Y-m-d') : $startDt->format('c');
+                    $endStr = null;
+                    if (isset($comp->DTEND)) {
+                        $endDt = $comp->DTEND->getDateTime();
+                        $endStr = $allDay ? $endDt->format('Y-m-d') : $endDt->format('c');
+                    } elseif (isset($comp->DURATION) && !$allDay) {
+                        try {
+                            $endDt = clone $startDt;
+                            $endDt->add($comp->DURATION->getDateInterval());
+                            $endStr = $endDt->format('c');
+                        } catch (\Throwable $e) {
+                            $endStr = null;
+                        }
+                    }
+                    $summary = isset($comp->SUMMARY) ? trim((string) $comp->SUMMARY) : '';
+                    $uid = isset($comp->UID) ? trim((string) $comp->UID) : $fallbackUid;
+                    $events[] = [
+                        'uid'     => $uid,
+                        'uri'     => $uri,
+                        'summary' => $summary !== '' ? $summary : '(No title)',
+                        'start'   => $startStr,
+                        'end'     => $endStr,
+                        'allDay'  => $allDay,
+                    ];
+                } catch (\Throwable $e) {
+                    continue;
+                }
+            }
+            $vcal->destroy();
+        }
+
+        usort($events, static function ($a, $b) {
+            return strcmp((string) $a['start'], (string) $b['start']);
+        });
+
+        return $events;
     }
 
     /**

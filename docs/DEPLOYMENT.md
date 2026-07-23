@@ -48,24 +48,37 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 ## User portal
 
 Modern UI (TypeScript SPA, dark theme aligned with bookmarks-sync admin style) for **end users**.  
-Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
+Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is under **(i)** icons.
 
 | Step | Action |
 |------|--------|
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
-| 3 | **My Calendars:** add/edit calendars, holidays, share, import/export `.ics` |
-| 4 | **My Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf` |
+| 3 | **Calendar:** owned list (Edit / Delete), month grid of events, create holidays/read-only calendars; details, share, and import/export `.ics` in the Edit modal |
+| 4 | **Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf` |
+| 5 | **Tasks / Notes:** CalDAV `VTODO` / `VJOURNAL` on writable calendars (bulk actions on tasks) |
 
 ### Screenshots
 
-**My Calendars** — owned calendars, holidays / read-only badges, edit details, import/export `.ics`, share:
+**Calendar** — owned calendars (Edit / Delete), badges (owner, read-only, holidays), add form, and month view of the selected calendar’s events:
 
-![User portal — My Calendars](images/portal-my-calendars.jpg)
+![User portal — Calendar](images/portal-my-calendars.jpg)
 
-**My Contacts** — address books (create/rename/delete), Google-style contact table, search, edit form with photo, import/export `.vcf`:
+**Calendar details** — edit name/color/description, import/export `.ics`, share with other users (modal):
 
-![User portal — My Contacts](images/portal-my-contacts.jpg)
+![User portal — Calendar details](images/portal-calendar-edit.jpg)
+
+**Contacts** — address books (create/rename/delete), Google-style contact table, search, edit form with photo, import/export `.vcf`:
+
+![User portal — Contacts](images/portal-my-contacts.jpg)
+
+**Tasks** — sortable `VTODO` list (subtasks indented), multi-select bulk status/due/%, create/edit form with parent task:
+
+![User portal — Tasks](images/portal-tasks.jpg)
+
+**Notes** — sortable `VJOURNAL` list with preview, create/edit form (title, date, body) on a writable calendar:
+
+![User portal — Notes](images/portal-notes.jpg)
 
 - Backend: PHP API under `/api/` (session cookie; sabre CalDAV/CardDAV backends).
 - Frontend source: [`portal/`](../portal/) (Vite + TypeScript); image build compiles into `html/portal/`.
@@ -208,7 +221,8 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.3`). Prefer rebasi
 - Full portal contacts: address book CRUD, contact table/search/edit, photos, multi email/phone, Unicode custom fields
 - CalDAV `ReadOnlyPlugin` for portal read-only calendars
 - Portal auth hardening (rate limit, idle timeout, CSRF/same-origin), import quotas, GD photos, CSP
-- Updated My Contacts screenshot
+- Calendar tab: month event grid, Edit/Delete on owned calendars, details/share modal; Tasks/Notes tabs; bulk task actions
+- Updated portal screenshots (Calendar, Calendar details, Contacts, Tasks, Notes)
 
 ### 0.11.1-fork.2
 
