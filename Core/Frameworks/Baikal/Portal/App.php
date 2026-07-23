@@ -102,11 +102,32 @@ class App {
         return $cur >= $need;
     }
 
+    /**
+     * Server-side portal log.
+     * warn/error → PHP error_log (visible in container/nginx).
+     * info/debug → Specific/portal_debug.log (does not flood nginx as [error]).
+     */
     private function portalServerLog(string $message, string $min = 'info'): void {
         if (!$this->portalServerLogEnabled($min)) {
             return;
         }
-        error_log('Baikal portal: ' . $message);
+        $line = 'Baikal portal: ' . $message;
+        // Real problems: stderr / container log
+        if ($min === 'error' || $min === 'warn') {
+            error_log($line);
+
+            return;
+        }
+        // Request tracing: file under Specific/ (nginx treats FPM stderr as [error])
+        $dir = defined('PROJECT_PATH_SPECIFIC')
+            ? PROJECT_PATH_SPECIFIC
+            : (defined('PROJECT_PATH_ROOT') ? PROJECT_PATH_ROOT . 'Specific/' : '');
+        if ($dir === '' || !is_dir($dir) || !is_writable($dir)) {
+            return;
+        }
+        $path = rtrim($dir, '/') . '/portal_debug.log';
+        $ts = date('Y-m-d H:i:s');
+        @file_put_contents($path, '[' . $ts . '] ' . $line . "\n", FILE_APPEND | LOCK_EX);
     }
 
     /**

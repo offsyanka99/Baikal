@@ -27,7 +27,7 @@ Set log level in `baikal.yaml` or env (env wins):
 | Env | `PORTAL_LOG_LEVEL` or `BAIKAL_PORTAL_LOG_LEVEL` | same |
 
 - **Browser:** DevTools → Console (`[baikal-portal]` prefix). `info` = API timings + UI events; `debug` = outbound requests + raw actions.
-- **Server:** PHP `error_log` for the same level (request lines).
+- **Server:** `info`/`debug` append to `Specific/portal_debug.log`; only `warn`/`error` go to PHP/`docker logs` (avoids nginx `[error]` spam from FastCGI stderr).
 
 ## Develop
 

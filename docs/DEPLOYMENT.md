@@ -113,7 +113,8 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 - Portal debug logging (`off` by default; enable while troubleshooting):
   - `system.portal_log_level` or `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL`: `off` | `error` | `warn` | `info` | `debug`
   - **Browser:** open DevTools → Console; messages are prefixed `[baikal-portal]`
-  - **Server:** same level writes request/outcome lines to PHP `error_log` (Docker: `docker logs baikal`)
+  - **Server:** `info`/`debug` → `Specific/portal_debug.log`; `warn`/`error` → PHP/`docker logs`
+  - Nginx may still show older images’ info lines as `[error]` (FastCGI stderr); HTTP status is what matters (200/401)
   - Public `GET /api/ui` returns prefs (including log level) without a session
 
 ### API (summary)

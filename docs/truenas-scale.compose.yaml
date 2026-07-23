@@ -51,7 +51,7 @@
 # Optional env:
 #   BAIKAL_LOCK_INSTALL=1     — refuse /admin/install after deploy
 #   BAIKAL_ALLOW_REINSTALL=1  — re-open installer intentionally
-#   PORTAL_LOG_LEVEL=debug    — portal console + PHP request logs (off|error|warn|info|debug)
+#   PORTAL_LOG_LEVEL=debug    — browser console + Specific/portal_debug.log (off|error|warn|info|debug)
 #   TIME_FORMAT=24h           — portal time display (auto|12h|24h)
 #   BAIKAL_PORTAL_WEEK_START=monday
 #
