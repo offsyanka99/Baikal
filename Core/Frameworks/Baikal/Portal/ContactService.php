@@ -836,7 +836,7 @@ class ContactService {
         $width = imagesx($src);
         $height = imagesy($src);
         if ($width < 1 || $height < 1) {
-            imagedestroy($src);
+            // GdImage is freed by GC (imagedestroy() deprecated in PHP 8.5)
             throw new ApiException('Invalid photo dimensions', 400);
         }
 
@@ -847,18 +847,15 @@ class ContactService {
             $newH = max(1, (int) round($height * $ratio));
             $dst = imagecreatetruecolor($newW, $newH);
             if ($dst === false) {
-                imagedestroy($src);
                 throw new ApiException('Failed to resize photo', 500);
             }
             imagecopyresampled($dst, $src, 0, 0, 0, 0, $newW, $newH, $width, $height);
-            imagedestroy($src);
             $src = $dst;
         }
 
         ob_start();
         imagejpeg($src, null, 85);
         $jpeg = ob_get_clean();
-        imagedestroy($src);
         if ($jpeg === false || $jpeg === '') {
             throw new ApiException('Failed to encode photo as JPEG', 500);
         }

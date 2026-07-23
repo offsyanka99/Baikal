@@ -125,7 +125,7 @@ if (function_exists('imagecreatetruecolor') && function_exists('imagejpeg')) {
     ob_start();
     imagejpeg($im, null, 90);
     $jpeg = ob_get_clean();
-    imagedestroy($im);
+    // GdImage is GC'd (imagedestroy() deprecated in PHP 8.5)
     assert_true(is_string($jpeg) && $jpeg !== '', 'fixture jpeg created');
 
     $out = $svc->processPhotoInput(base64_encode($jpeg), true);
@@ -140,7 +140,6 @@ if (function_exists('imagecreatetruecolor') && function_exists('imagejpeg')) {
         $w = imagesx($check);
         $h = imagesy($check);
         assert_true($w <= 256 && $h <= 256, "resized within 256 (got {$w}x{$h})");
-        imagedestroy($check);
     }
 
     $withPhoto = $svc->buildVCardFromFields([
