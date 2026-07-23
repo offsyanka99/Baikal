@@ -45,6 +45,48 @@ export type CalendarEvent = {
   allDay: boolean;
 };
 
+export type EventRepeat = {
+  freq: "" | "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY" | string;
+  interval: number;
+  until: string | null;
+  count: number | null;
+  byDay: string[];
+  /** UI-only: keep Ends=On date even before a date is chosen */
+  endMode?: "never" | "until" | "count";
+};
+
+/** Full VEVENT for the edit modal */
+export type CalendarEventDetail = {
+  uri: string;
+  instanceId: number;
+  calendarId: number;
+  calendarName: string;
+  calendarUri: string;
+  uid: string;
+  summary: string;
+  description: string;
+  location: string;
+  start: string | null;
+  end: string | null;
+  allDay: boolean;
+  hasRrule: boolean;
+  repeat: EventRepeat;
+  readOnly: boolean;
+  canWrite: boolean;
+};
+
+export type EventWriteBody = {
+  summary?: string;
+  description?: string;
+  location?: string;
+  start?: string | null;
+  end?: string | null;
+  allDay?: boolean;
+  /** Move to another calendar (instance id) */
+  instanceId?: number;
+  repeat?: EventRepeat | null;
+};
+
 export type Share = {
   href: string;
   principal: string;
@@ -114,6 +156,11 @@ export type ContactDetail = {
   address: ContactAddress;
   url: string;
   note: string;
+  /** YYYY-MM-DD (vCard BDAY) */
+  birthday?: string | null;
+  /** YYYY-MM-DD (vCard ANNIVERSARY / special) */
+  specialDate?: string | null;
+  specialDateLabel?: string;
   custom: ContactCustomField[];
   hasPhoto: boolean;
   photoDataUri?: string | null;
@@ -130,6 +177,9 @@ export type ContactWriteBody = {
   address?: ContactAddress;
   url?: string;
   note?: string;
+  birthday?: string | null;
+  specialDate?: string | null;
+  specialDateLabel?: string;
   custom?: ContactCustomField[];
   photoBase64?: string | null;
   removePhoto?: boolean;
@@ -272,6 +322,7 @@ export const api = {
       csrfToken?: string;
       version: string | null;
       davPath: string;
+      ui?: { timeFormat?: string; weekStart?: string };
     }>("/me");
     setCsrfToken(data.csrfToken || data.user?.csrfToken);
     return data;
@@ -325,6 +376,24 @@ export const api = {
       `/calendars/${instanceId}/events?${qs}`,
     );
   },
+  getEvent: (instanceId: number, uri: string) =>
+    request<{ event: CalendarEventDetail }>(
+      `/calendars/${instanceId}/events/${encUri(uri)}`,
+    ),
+  createEvent: (instanceId: number, body: EventWriteBody) =>
+    request<{ event: CalendarEventDetail }>(`/calendars/${instanceId}/events`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateEvent: (instanceId: number, uri: string, body: EventWriteBody) =>
+    request<{ event: CalendarEventDetail }>(
+      `/calendars/${instanceId}/events/${encUri(uri)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  deleteEvent: (instanceId: number, uri: string) =>
+    request<{ ok: boolean }>(`/calendars/${instanceId}/events/${encUri(uri)}`, {
+      method: "DELETE",
+    }),
   exportCalendar: async (instanceId: number): Promise<{ blob: Blob; filename: string }> => {
     const res = await fetch(`/api/calendars/${instanceId}/export`, {
       credentials: "same-origin",
@@ -444,6 +513,30 @@ export const api = {
       `/addressbooks/${abId}/contacts/${encUri(uri)}`,
       { method: "DELETE" },
     ),
+  exportContact: async (
+    abId: number,
+    uri: string,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(
+      `/api/addressbooks/${abId}/contacts/${encUri(uri)}/export`,
+      { credentials: "same-origin" },
+    );
+    if (!res.ok) {
+      let msg = `Export failed (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data.error) msg = data.error;
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(msg, res.status);
+    }
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/i.exec(cd);
+    const filename = m?.[1] || `contact.vcf`;
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   contactPhotoUrl: (abId: number, uri: string): string =>
     `/api/addressbooks/${abId}/contacts/${encUri(uri)}/photo`,
 

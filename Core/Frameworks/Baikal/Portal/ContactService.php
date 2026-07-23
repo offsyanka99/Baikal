@@ -197,6 +197,47 @@ class ContactService {
     }
 
     /**
+     * Export a single contact as a .vcf file.
+     *
+     * @return array{vcf: string, filename: string}
+     */
+    public function exportContact(string $username, int $addressBookId, string $uri): array {
+        $this->requireOwnedAddressBook($username, $addressBookId);
+        $uri = $this->normalizeCardUri($uri);
+        $row = $this->backend->getCard($addressBookId, $uri);
+        if (!$row) {
+            throw new ApiException('Contact not found', 404);
+        }
+        $carddata = $this->cardDataToString($row['carddata'] ?? '');
+        if ($carddata === '') {
+            throw new ApiException('Contact data is empty or unreadable', 500);
+        }
+        $vcf = rtrim($carddata, "\r\n") . "\r\n";
+
+        $fields = $this->parseVCard($carddata);
+        $label = trim((string) ($fields['fullname'] ?? ''));
+        if ($label === '') {
+            $label = trim(
+                trim((string) ($fields['firstname'] ?? '')) . ' ' . trim((string) ($fields['lastname'] ?? ''))
+            );
+        }
+        if ($label === '') {
+            $label = pathinfo($uri, PATHINFO_FILENAME) ?: 'contact';
+        }
+        $safeName = preg_replace('/[^a-zA-Z0-9-_ ]/u', '', $label) ?: 'contact';
+        $safeName = trim(preg_replace('/\s+/', '-', $safeName) ?? 'contact', '-');
+        if ($safeName === '') {
+            $safeName = 'contact';
+        }
+        $filename = $safeName . '-' . date('Y-m-d') . '.vcf';
+
+        return [
+            'vcf'      => $vcf,
+            'filename' => $filename,
+        ];
+    }
+
+    /**
      * @return array{imported: int, updated: int, skipped: int}
      */
     public function importAddressBook(string $username, int $addressBookId, string $vcfData): array {
@@ -537,25 +578,28 @@ class ContactService {
      */
     public function parseVCard(string $carddata): array {
         $empty = [
-            'firstname'   => '',
-            'lastname'    => '',
-            'fullname'    => '',
-            'org'         => '',
-            'title'       => '',
-            'emails'      => [],
-            'phones'      => [],
-            'address'     => [
+            'firstname'         => '',
+            'lastname'          => '',
+            'fullname'          => '',
+            'org'               => '',
+            'title'             => '',
+            'emails'            => [],
+            'phones'            => [],
+            'address'           => [
                 'street'  => '',
                 'city'    => '',
                 'region'  => '',
                 'postal'  => '',
                 'country' => '',
             ],
-            'url'         => '',
-            'note'        => '',
-            'custom'      => [],
-            'hasPhoto'    => false,
-            'photoBinary' => null,
+            'url'               => '',
+            'note'              => '',
+            'birthday'          => null,
+            'specialDate'       => null,
+            'specialDateLabel'  => '',
+            'custom'            => [],
+            'hasPhoto'          => false,
+            'photoBinary'       => null,
         ];
 
         if (trim($carddata) === '') {
@@ -594,6 +638,25 @@ class ContactService {
         if (isset($vcard->URL)) {
             $data['url'] = $this->utf8((string) $vcard->URL);
         }
+        $data['birthday'] = $this->parseVCardDateProp($vcard, 'BDAY');
+        $special = $this->parseVCardDateProp($vcard, 'ANNIVERSARY');
+        if ($special === null) {
+            $special = $this->parseVCardDateProp($vcard, 'X-SPECIAL-DATE');
+        }
+        if ($special === null) {
+            $special = $this->parseVCardDateProp($vcard, 'X-ABDATE');
+        }
+        $data['specialDate'] = $special;
+        $specialLabel = '';
+        foreach (['X-SPECIAL-LABEL', 'X-SPECIAL-DATE-LABEL', 'X-ABLABEL'] as $labProp) {
+            if (isset($vcard->{$labProp})) {
+                $specialLabel = $this->utf8(trim((string) $vcard->{$labProp}));
+                if ($specialLabel !== '') {
+                    break;
+                }
+            }
+        }
+        $data['specialDateLabel'] = $specialLabel;
 
         $emails = [];
         if (isset($vcard->EMAIL)) {
@@ -1038,27 +1101,106 @@ class ContactService {
             'emails'    => $emails,
             'phones'    => $phones,
             'address'   => $address,
-            'url'       => mb_substr(trim((string) ($fields['url'] ?? '')), 0, self::MAX_URL_LEN),
-            'note'      => mb_substr(trim((string) ($fields['note'] ?? '')), 0, self::MAX_NOTE_LEN),
-            'custom'    => $custom,
+            'url'              => mb_substr(trim((string) ($fields['url'] ?? '')), 0, self::MAX_URL_LEN),
+            'note'             => mb_substr(trim((string) ($fields['note'] ?? '')), 0, self::MAX_NOTE_LEN),
+            'birthday'         => $this->normalizeDateField($fields['birthday'] ?? null),
+            'specialDate'      => $this->normalizeDateField($fields['specialDate'] ?? null),
+            'specialDateLabel' => mb_substr(trim((string) ($fields['specialDateLabel'] ?? '')), 0, 64),
+            'custom'           => $custom,
             // track which managed groups were present in the request (for partial PATCH)
-            '_has'      => [
-                'name'    => array_key_exists('firstname', $fields)
+            '_has'             => [
+                'name'       => array_key_exists('firstname', $fields)
                     || array_key_exists('lastname', $fields)
                     || array_key_exists('fullname', $fields),
-                'org'     => array_key_exists('org', $fields),
-                'title'   => array_key_exists('title', $fields),
-                'emails'  => array_key_exists('emails', $fields) || array_key_exists('email', $fields),
-                'phones'  => array_key_exists('phones', $fields)
+                'org'        => array_key_exists('org', $fields),
+                'title'      => array_key_exists('title', $fields),
+                'emails'     => array_key_exists('emails', $fields) || array_key_exists('email', $fields),
+                'phones'     => array_key_exists('phones', $fields)
                     || array_key_exists('tel_cell', $fields)
                     || array_key_exists('tel_work', $fields)
                     || array_key_exists('tel_home', $fields),
-                'address' => array_key_exists('address', $fields),
-                'url'     => array_key_exists('url', $fields),
-                'note'    => array_key_exists('note', $fields),
-                'custom'  => array_key_exists('custom', $fields),
+                'address'    => array_key_exists('address', $fields),
+                'url'        => array_key_exists('url', $fields),
+                'note'       => array_key_exists('note', $fields),
+                'birthday'   => array_key_exists('birthday', $fields),
+                'specialDate'=> array_key_exists('specialDate', $fields)
+                    || array_key_exists('specialDateLabel', $fields),
+                'custom'     => array_key_exists('custom', $fields),
             ],
         ];
+    }
+
+    /**
+     * @param mixed $raw
+     */
+    private function normalizeDateField($raw): ?string {
+        if ($raw === null) {
+            return null;
+        }
+        $s = trim((string) $raw);
+        if ($s === '') {
+            return null;
+        }
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $s, $m)) {
+            if (!checkdate((int) $m[2], (int) $m[3], (int) $m[1])) {
+                throw new ApiException('Invalid date', 400);
+            }
+
+            return $s;
+        }
+        if (preg_match('/^(\d{4})(\d{2})(\d{2})$/', $s, $m)) {
+            if (!checkdate((int) $m[2], (int) $m[3], (int) $m[1])) {
+                throw new ApiException('Invalid date', 400);
+            }
+
+            return $m[1] . '-' . $m[2] . '-' . $m[3];
+        }
+        throw new ApiException('Dates must be YYYY-MM-DD', 400);
+    }
+
+    /**
+     * @param mixed $vcard VCard
+     */
+    private function parseVCardDateProp($vcard, string $name): ?string {
+        if (!isset($vcard->{$name})) {
+            return null;
+        }
+        $prop = $vcard->{$name};
+        try {
+            if (is_object($prop) && method_exists($prop, 'getDateTime')) {
+                return $prop->getDateTime()->format('Y-m-d');
+            }
+        } catch (\Throwable $e) {
+            // fall through to string parse
+        }
+        $raw = trim((string) $prop);
+        if ($raw === '') {
+            return null;
+        }
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $raw, $m)) {
+            return $m[1] . '-' . $m[2] . '-' . $m[3];
+        }
+        if (preg_match('/^(\d{4})(\d{2})(\d{2})/', $raw, $m)) {
+            return $m[1] . '-' . $m[2] . '-' . $m[3];
+        }
+
+        return null;
+    }
+
+    /**
+     * @param mixed $vcard VCard component/property holder
+     */
+    private function setVCardDateProp($vcard, string $name, ?string $ymd): void {
+        unset($vcard->{$name});
+        if ($ymd === null || $ymd === '') {
+            return;
+        }
+        try {
+            $dt = new \DateTime($ymd . ' 00:00:00', new \DateTimeZone('UTC'));
+            $vcard->add($name, $dt, ['VALUE' => 'DATE']);
+        } catch (\Throwable $e) {
+            $vcard->{$name} = str_replace('-', '', $ymd);
+        }
     }
 
     /**
@@ -1152,6 +1294,10 @@ class ContactService {
             }
         }
 
+        if ($isCreate || !empty($has['birthday'])) {
+            $this->setVCardDateProp($vcard, 'BDAY', $normalized['birthday'] ?? null);
+        }
+
         if ($isCreate || !empty($has['emails'])) {
             unset($vcard->EMAIL);
             foreach ($normalized['emails'] as $email) {
@@ -1187,6 +1333,19 @@ class ContactService {
         if ($isCreate || !empty($has['custom'])) {
             $this->replaceCustomProperties($vcard, $normalized['custom'] ?? []);
         }
+
+        // After custom X-* replace so our managed labels are not wiped
+        if ($isCreate || !empty($has['specialDate'])) {
+            unset($vcard->ANNIVERSARY, $vcard->{'X-SPECIAL-DATE'}, $vcard->{'X-SPECIAL-LABEL'}, $vcard->{'X-SPECIAL-DATE-LABEL'});
+            $special = $normalized['specialDate'] ?? null;
+            $label = trim((string) ($normalized['specialDateLabel'] ?? ''));
+            if (is_string($special) && $special !== '') {
+                $this->setVCardDateProp($vcard, 'ANNIVERSARY', $special);
+                if ($label !== '') {
+                    $vcard->add('X-SPECIAL-LABEL', $label);
+                }
+            }
+        }
     }
 
     /**
@@ -1206,6 +1365,10 @@ class ContactService {
                 $baseName = substr($propName, (int) strrpos($propName, '.') + 1);
             }
             if (!str_starts_with($baseName, 'X-')) {
+                continue;
+            }
+            // Managed by birthday / special date handlers
+            if (in_array($baseName, ['X-SPECIAL-LABEL', 'X-SPECIAL-DATE', 'X-SPECIAL-DATE-LABEL'], true)) {
                 continue;
             }
             $val = $child->getValue();
@@ -1479,9 +1642,16 @@ class ContactService {
                 'postal'  => $this->utf8((string) ($address['postal'] ?? '')),
                 'country' => $this->utf8((string) ($address['country'] ?? '')),
             ],
-            'url'          => $this->utf8((string) ($fields['url'] ?? '')),
-            'note'         => $this->utf8((string) ($fields['note'] ?? '')),
-            'custom'       => array_values(array_map(function ($c) {
+            'url'               => $this->utf8((string) ($fields['url'] ?? '')),
+            'note'              => $this->utf8((string) ($fields['note'] ?? '')),
+            'birthday'          => isset($fields['birthday']) && is_string($fields['birthday']) && $fields['birthday'] !== ''
+                ? $fields['birthday']
+                : null,
+            'specialDate'       => isset($fields['specialDate']) && is_string($fields['specialDate']) && $fields['specialDate'] !== ''
+                ? $fields['specialDate']
+                : null,
+            'specialDateLabel'  => $this->utf8((string) ($fields['specialDateLabel'] ?? '')),
+            'custom'            => array_values(array_map(function ($c) {
                 if (!is_array($c)) {
                     return ['label' => '', 'value' => ''];
                 }
@@ -1492,8 +1662,8 @@ class ContactService {
                     'value' => $this->utf8((string) ($c['value'] ?? '')),
                 ];
             }, $custom)),
-            'hasPhoto'     => !empty($fields['hasPhoto']),
-            'photoDataUri' => $photoDataUri,
+            'hasPhoto'          => !empty($fields['hasPhoto']),
+            'photoDataUri'      => $photoDataUri,
         ];
     }
 

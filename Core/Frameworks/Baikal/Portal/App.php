@@ -20,10 +20,14 @@ class App {
     /** @var CalendarItemService */
     private $items;
 
+    /** @var array<string, mixed> */
+    private $config;
+
     /** @var array<string, mixed>|null Cached JSON body (php://input is one-shot) */
     private $jsonBodyCache = null;
 
     public function __construct(\PDO $pdo, array $config) {
+        $this->config = $config;
         $realm = (string) ($config['system']['auth_realm'] ?? 'BaikalDAV');
         $sessionMax = Auth::DEFAULT_SESSION_MAX_AGE;
         if (isset($config['system']['session_max_age_minutes'])
@@ -36,6 +40,37 @@ class App {
         $this->shares = new ShareService($pdo);
         $this->contacts = new ContactService($pdo);
         $this->items = new CalendarItemService($pdo);
+    }
+
+    /**
+     * Portal UI prefs (time format / week start). Env overrides YAML.
+     * TIME_FORMAT / BAIKAL_PORTAL_TIME_FORMAT: auto|12h|24h
+     * BAIKAL_PORTAL_WEEK_START: auto|monday|sunday
+     *
+     * @return array{timeFormat: string, weekStart: string}
+     */
+    private function portalUiSettings(): array {
+        $sys = is_array($this->config['system'] ?? null) ? $this->config['system'] : [];
+        $time = strtolower(trim((string) (
+            getenv('TIME_FORMAT')
+            ?: getenv('BAIKAL_PORTAL_TIME_FORMAT')
+            ?: ($sys['portal_time_format'] ?? 'auto')
+        )));
+        if (!in_array($time, ['auto', '12h', '24h'], true)) {
+            $time = 'auto';
+        }
+        $week = strtolower(trim((string) (
+            getenv('BAIKAL_PORTAL_WEEK_START')
+            ?: ($sys['portal_week_start'] ?? 'auto')
+        )));
+        if (!in_array($week, ['auto', 'monday', 'sunday'], true)) {
+            $week = 'auto';
+        }
+
+        return [
+            'timeFormat' => $time,
+            'weekStart'  => $week,
+        ];
     }
 
     /**
@@ -86,6 +121,14 @@ class App {
             if ($method === 'GET' && preg_match('#^/addressbooks/(\d+)/export$#', $path, $m)) {
                 $username = $this->auth->requireUser();
                 $export = $this->contacts->exportAddressBook($username, (int) $m[1]);
+                $this->fileDownload($export['vcf'], $export['filename'], 'text/vcard; charset=utf-8');
+
+                return;
+            }
+            // Single contact VCF export
+            if ($method === 'GET' && preg_match('#^/addressbooks/(\d+)/contacts/([^/]+)/export$#', $path, $m)) {
+                $username = $this->auth->requireUser();
+                $export = $this->contacts->exportContact($username, (int) $m[1], rawurldecode($m[2]));
                 $this->fileDownload($export['vcf'], $export['filename'], 'text/vcard; charset=utf-8');
 
                 return;
@@ -165,6 +208,7 @@ class App {
                 'csrfToken' => $this->auth->csrfToken(),
                 'version'   => defined('BAIKAL_VERSION') ? BAIKAL_VERSION : null,
                 'davPath'   => '/dav.php/',
+                'ui'        => $this->portalUiSettings(),
             ];
         }
 
@@ -211,14 +255,43 @@ class App {
         }
 
         // GET /calendars/{id}/events?from=YYYY-MM-DD&to=YYYY-MM-DD — month view
-        if ($method === 'GET' && preg_match('#^/calendars/(\d+)/events$#', $path, $m)) {
+        // POST /calendars/{id}/events — create VEVENT
+        if (preg_match('#^/calendars/(\d+)/events$#', $path, $m)) {
             $instanceId = (int) $m[1];
-            $from = isset($_GET['from']) ? (string) $_GET['from'] : '';
-            $to = isset($_GET['to']) ? (string) $_GET['to'] : '';
+            if ($method === 'GET') {
+                $from = isset($_GET['from']) ? (string) $_GET['from'] : '';
+                $to = isset($_GET['to']) ? (string) $_GET['to'] : '';
 
-            return [
-                'events' => $this->shares->listEvents($username, $instanceId, $from, $to),
-            ];
+                return [
+                    'events' => $this->shares->listEvents($username, $instanceId, $from, $to),
+                ];
+            }
+            if ($method === 'POST') {
+                $body = $this->jsonBody();
+                $event = $this->shares->createEvent($username, $instanceId, $body);
+
+                return ['event' => $event];
+            }
+        }
+
+        // GET|PATCH|DELETE /calendars/{id}/events/{uri} — single VEVENT
+        if (preg_match('#^/calendars/(\d+)/events/([^/]+)$#', $path, $m)) {
+            $instanceId = (int) $m[1];
+            $uri = rawurldecode($m[2]);
+            if ($method === 'GET') {
+                return ['event' => $this->shares->getEvent($username, $instanceId, $uri)];
+            }
+            if ($method === 'PATCH' || $method === 'PUT') {
+                $body = $this->jsonBody();
+                $event = $this->shares->updateEvent($username, $instanceId, $uri, $body);
+
+                return ['event' => $event];
+            }
+            if ($method === 'DELETE') {
+                $this->shares->deleteEvent($username, $instanceId, $uri);
+
+                return ['ok' => true];
+            }
         }
 
         // POST /calendars/{id}/import — ICS body (JSON {ics} or raw text/calendar)

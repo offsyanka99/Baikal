@@ -13,6 +13,11 @@ system:
     auth_realm: BaikalDAV
     base_uri: ''
     session_max_age_minutes: 15
+    # Portal SPA locale helpers (override browser auto-detect). Env also works:
+    #   TIME_FORMAT / BAIKAL_PORTAL_TIME_FORMAT = auto|12h|24h
+    #   BAIKAL_PORTAL_WEEK_START = auto|monday|sunday
+    portal_time_format: 'auto'
+    portal_week_start: 'auto'
 database:
     encryption_key: 5d3f0fa0192e3058ea70f1bb20924add
     backend: 'mysql'

@@ -131,7 +131,7 @@ class Holidays {
                 CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_TIMEOUT        => 15,
                 CURLOPT_CONNECTTIMEOUT => 8,
-                CURLOPT_USERAGENT      => 'Baikal-Portal/0.11.1-fork.2',
+                CURLOPT_USERAGENT      => 'Baikal-Portal/0.11.1-fork.4',
                 CURLOPT_HTTPHEADER     => ['Accept: application/json'],
             ]);
             $body = curl_exec($ch);

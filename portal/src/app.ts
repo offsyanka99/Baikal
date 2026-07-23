@@ -4,6 +4,7 @@ import {
   type AddressBook,
   type Calendar,
   type CalendarEvent,
+  type CalendarEventDetail,
   type ContactCustomField,
   type ContactDetail,
   type ContactPhone,
@@ -20,7 +21,7 @@ import {
 
 type TabId = "calendars" | "contacts" | "tasks" | "notes";
 
-const APP_VERSION = "0.11.1-fork.3";
+const APP_VERSION = "0.11.1-fork.4";
 const DOCS_URL = "https://github.com/offsyanka99/Baikal/tree/master/docs";
 
 type Flash = { type: "error" | "success" | "info"; message: string } | null;
@@ -193,12 +194,37 @@ export function mountApp(root: HTMLElement): void {
   let shares: Share[] = [];
   /** Calendar details + share live in a modal (not the right column). */
   let calModalOpen = false;
+  /** Create calendar form lives in its own modal. */
+  let createCalModalOpen = false;
   /** Owned calendar pending delete confirmation. */
   let deleteConfirmId: number | null = null;
+  /** Address book delete confirmation modal (mirrors calendar delete) */
+  let deleteAbConfirmId: number | null = null;
   /** Month grid cursor (local calendar). */
   let monthCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
   let monthEvents: CalendarEvent[] = [];
   let monthEventsLoading = false;
+  /** VEVENT create/edit modal (day cell → new; event chip → edit) */
+  let eventModalOpen = false;
+  let editingEvent: CalendarEventDetail | null = null;
+  let creatingEvent = false;
+  /**
+   * Custom portal date/time picker (events, tasks, notes, bulk due).
+   * field ids: start | end | until | due | dtstart | bulk-due
+   */
+  let eventDtPicker: {
+    field: string;
+    viewY: number;
+    viewM: number;
+    dateOnly: boolean;
+    allowClear: boolean;
+    /** hidden input name attribute */
+    name: string;
+  } | null = null;
+  /** Bulk-bar due value (survives re-render) */
+  let bulkDueValue = "";
+  /** YYYY-MM-DD day with “+N more” expanded to show all chips */
+  let monthExpandDay: string | null = null;
   let addressBooks: AddressBook[] = [];
   let selectedAbId: number | null = null;
   let contacts: ContactSummary[] = [];
@@ -207,6 +233,10 @@ export function mountApp(root: HTMLElement): void {
   let editingContact: ContactDetail | null = null;
   /** When true, form is for a new contact (no uri yet). */
   let creatingContact = false;
+  /** Contact create/edit lives in a modal (list stays full height). */
+  let contactModalOpen = false;
+  /** Address book edit (details + import/export) lives in a modal. */
+  let abModalOpen = false;
   let photoPreview: string | null = null;
   let photoBase64Pending: string | null = null;
   let removePhotoPending = false;
@@ -215,6 +245,11 @@ export function mountApp(root: HTMLElement): void {
   let lastImportResult: { ok: boolean; message: string } | null = null;
   let lastContactImportResult: { ok: boolean; message: string } | null = null;
   let escapeBound = false;
+  /** From /me + baikal.yaml / env (TIME_FORMAT, BAIKAL_PORTAL_WEEK_START) */
+  let portalUi: { timeFormat: "auto" | "12h" | "24h"; weekStart: "auto" | "monday" | "sunday" } = {
+    timeFormat: "auto",
+    weekStart: "auto",
+  };
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Tasks / Notes (CalDAV VTODO / VJOURNAL)
@@ -249,6 +284,12 @@ export function mountApp(root: HTMLElement): void {
     try {
       const me = await api.me();
       user = me.user;
+      const tf = (me.ui?.timeFormat || "auto").toLowerCase();
+      const ws = (me.ui?.weekStart || "auto").toLowerCase();
+      portalUi = {
+        timeFormat: tf === "12h" || tf === "24h" ? tf : "auto",
+        weekStart: ws === "monday" || ws === "sunday" ? ws : "auto",
+      };
       await loadHome();
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
@@ -304,6 +345,12 @@ export function mountApp(root: HTMLElement): void {
       editingContact = null;
       creatingContact = false;
     }
+    if (
+      deleteAbConfirmId !== null &&
+      !addressBooks.some((a) => a.id === deleteAbConfirmId)
+    ) {
+      deleteAbConfirmId = null;
+    }
     if (selectedAbId === null && addressBooks.length > 0) {
       selectedAbId = addressBooks[0].id;
     }
@@ -342,13 +389,93 @@ export function mountApp(root: HTMLElement): void {
     return { from: ymd(from), to: ymd(to) };
   }
 
-  function eventDayKey(ev: CalendarEvent): string {
-    if (ev.allDay || /^\d{4}-\d{2}-\d{2}$/.test(ev.start)) {
-      return ev.start.slice(0, 10);
+  /** Local calendar date of an event start/end string. */
+  function eventLocalDate(iso: string): Date {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+      const [ys, ms, ds] = iso.split("-").map(Number);
+      return new Date(ys, ms - 1, ds);
     }
-    const d = new Date(ev.start);
-    if (Number.isNaN(d.getTime())) return ev.start.slice(0, 10);
-    return ymd(d);
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) {
+      const [ys, ms, ds] = iso.slice(0, 10).split("-").map(Number);
+      return new Date(ys, (ms || 1) - 1, ds || 1);
+    }
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  /**
+   * Days an event occupies (inclusive). All-day end from API is inclusive last day.
+   * Timed events span every local day from start through end.
+   */
+  function eventDayKeys(ev: CalendarEvent): string[] {
+    const startD = eventLocalDate(ev.start);
+    if (!ev.end) return [ymd(startD)];
+    let endD = eventLocalDate(ev.end);
+    // Timed: if end is midnight exclusive of next day, still count previous day
+    if (!ev.allDay && !/^\d{4}-\d{2}-\d{2}$/.test(ev.end)) {
+      const endFull = new Date(ev.end);
+      if (
+        !Number.isNaN(endFull.getTime()) &&
+        endFull.getHours() === 0 &&
+        endFull.getMinutes() === 0 &&
+        endFull.getSeconds() === 0 &&
+        endFull.getTime() > new Date(ev.start).getTime()
+      ) {
+        endD = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate() - 1);
+      }
+    }
+    if (endD < startD) return [ymd(startD)];
+    const keys: string[] = [];
+    const cur = new Date(startD.getFullYear(), startD.getMonth(), startD.getDate());
+    const last = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate());
+    let guard = 0;
+    while (cur <= last && guard++ < 370) {
+      keys.push(ymd(cur));
+      cur.setDate(cur.getDate() + 1);
+    }
+    return keys.length ? keys : [ymd(startD)];
+  }
+
+  /** When leaving all-day: same calendar day(s) with rounded-up times (or 09:00 on other days). */
+  function convertAllDaySpanToTimed(
+    startDate: string,
+    endDate: string | null,
+  ): { start: string; end: string | null } {
+    const s = startDate.slice(0, 10);
+    const e = (endDate || s).slice(0, 10);
+    if (s === e) {
+      const range = defaultTimedRange(s);
+      return { start: range.start, end: range.end };
+    }
+    // Multi-day: start 09:00 first day → 17:00 last day
+    const [ys, ms, ds] = s.split("-").map(Number);
+    const [ye, me, de] = e.split("-").map(Number);
+    const start = formatLocalDtValue(new Date(ys, ms - 1, ds, 9, 0, 0, 0));
+    const end = formatLocalDtValue(new Date(ye, me - 1, de, 17, 0, 0, 0));
+    return { start, end };
+  }
+
+  function convertTimedSpanToAllDay(
+    startIso: string,
+    endIso: string | null,
+  ): { start: string; end: string | null } {
+    const s = toDateInputValue(startIso);
+    let e = endIso ? toDateInputValue(endIso) : s;
+    if (endIso && !/^\d{4}-\d{2}-\d{2}$/.test(endIso)) {
+      const endFull = new Date(endIso);
+      if (
+        !Number.isNaN(endFull.getTime()) &&
+        endFull.getHours() === 0 &&
+        endFull.getMinutes() === 0 &&
+        endFull.getTime() > new Date(startIso).getTime()
+      ) {
+        // exclusive midnight → previous inclusive day
+        const d = eventLocalDate(endIso);
+        d.setDate(d.getDate() - 1);
+        e = ymd(d);
+      }
+    }
+    return { start: s, end: e };
   }
 
   async function loadMonthEvents() {
@@ -375,6 +502,18 @@ export function mountApp(root: HTMLElement): void {
     });
   }
 
+  /** Chip text: "10:45 Title" for timed events; title only for all-day. */
+  function formatEventChipLabel(ev: CalendarEvent): string {
+    const title = ev.summary || "(No title)";
+    if (ev.allDay || /^\d{4}-\d{2}-\d{2}$/.test(ev.start)) {
+      return title;
+    }
+    const d = new Date(ev.start);
+    if (Number.isNaN(d.getTime())) return title;
+    const time = d.toLocaleTimeString(undefined, timeFormatOpts());
+    return `${time} ${title}`;
+  }
+
   function renderMonthGrid(): string {
     const selected = selectedId !== null ? calendars.find((c) => c.id === selectedId) : null;
     const calName = selected?.displayname ?? "Calendar";
@@ -387,19 +526,21 @@ export function mountApp(root: HTMLElement): void {
     const y = monthCursor.y;
     const m = monthCursor.m;
     const first = new Date(y, m, 1);
-    // Monday-first (match common EU / screenshot layout)
-    const startPad = (first.getDay() + 6) % 7;
+    const weekStart = localeWeekStart();
+    const startPad = (first.getDay() - weekStart + 7) % 7;
     const daysInMonth = new Date(y, m + 1, 0).getDate();
     const prevDays = new Date(y, m, 0).getDate();
     const today = new Date();
     const todayKey = ymd(today);
+    const dowLabels = localeDowLabels();
 
     const byDay = new Map<string, CalendarEvent[]>();
     for (const ev of monthEvents) {
-      const key = eventDayKey(ev);
-      const list = byDay.get(key) ?? [];
-      list.push(ev);
-      byDay.set(key, list);
+      for (const key of eventDayKeys(ev)) {
+        const list = byDay.get(key) ?? [];
+        list.push(ev);
+        byDay.set(key, list);
+      }
     }
 
     const cells: string[] = [];
@@ -423,22 +564,35 @@ export function mountApp(root: HTMLElement): void {
       const key = ymd(cellDate);
       const isToday = key === todayKey;
       const dayEvents = inMonth ? byDay.get(key) ?? [] : [];
-      const maxShow = 3;
+      const maxShow = monthExpandDay === key ? 50 : 3;
       const shown = dayEvents.slice(0, maxShow);
       const more = dayEvents.length - shown.length;
       const chips = shown
-        .map(
-          (ev) =>
-            `<span class="month-event" title="${esc(ev.summary)}" style="--ev-color:${esc(color)}">${esc(ev.summary)}</span>`,
-        )
+        .map((ev) => {
+          const inst = selectedId ?? 0;
+          const label = formatEventChipLabel(ev);
+          return `<button type="button" class="month-event${!ev.allDay ? " is-timed" : ""}" title="${esc(label)}" style="--ev-color:${esc(color)}"
+            data-action="open-event" data-instance="${inst}" data-uri="${esc(ev.uri)}" ${busy ? "disabled" : ""}>${esc(label)}</button>`;
+        })
         .join("");
       const moreHtml =
-        more > 0 ? `<span class="month-event-more">+${more} more</span>` : "";
+        more > 0
+          ? `<button type="button" class="month-event-more" data-action="open-event-day" data-day="${esc(key)}" title="Show all events this day" ${busy ? "disabled" : ""}>+${more} more</button>`
+          : "";
       const dayLabel =
         !inMonth && (dayNum === 1 || i === startPad + daysInMonth)
           ? cellDate.toLocaleString(undefined, { month: "short", day: "numeric" })
           : String(dayNum);
-      cells.push(`<div class="month-cell${inMonth ? "" : " is-outside"}${isToday ? " is-today" : ""}">
+      const canCreate = !!(
+        selected &&
+        !selected.readOnly &&
+        (selected.canShare || selected.access === "readwrite")
+      );
+      cells.push(`<div class="month-cell${inMonth ? "" : " is-outside"}${isToday ? " is-today" : ""}${canCreate ? " is-clickable" : ""}"${
+        canCreate
+          ? ` data-action="new-event-day" data-day="${esc(key)}" role="button" tabindex="0" title="Add event on ${esc(key)}"`
+          : ""
+      }>
         <div class="month-daynum${isToday ? " is-today-num" : ""}">${esc(dayLabel)}</div>
         <div class="month-events">${chips}${moreHtml}</div>
       </div>`);
@@ -467,15 +621,634 @@ export function mountApp(root: HTMLElement): void {
       ${emptyHint}
       <div class="month-grid-wrap" role="grid" aria-label="Month calendar">
         <div class="month-dow-row" role="row">
-          <div class="month-dow">Mon</div><div class="month-dow">Tue</div><div class="month-dow">Wed</div>
-          <div class="month-dow">Thu</div><div class="month-dow">Fri</div><div class="month-dow">Sat</div>
-          <div class="month-dow">Sun</div>
+          ${dowLabels.map((l) => `<div class="month-dow">${esc(l)}</div>`).join("")}
         </div>
         <div class="month-grid" role="rowgroup">
           ${cells.join("")}
         </div>
       </div>
     </section>`;
+  }
+
+  function toDateInputValue(iso: string | null | undefined): string {
+    if (!iso) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+    return ymd(d);
+  }
+
+  /** Prefer 12-hour clock? Uses portal YAML/env override, then browser hourCycle. */
+  function preferHour12(): boolean {
+    if (portalUi.timeFormat === "24h") return false;
+    if (portalUi.timeFormat === "12h") return true;
+    try {
+      const ro = new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions() as {
+        hourCycle?: string;
+        hour12?: boolean;
+      };
+      if (ro.hourCycle === "h23" || ro.hourCycle === "h24") return false;
+      if (ro.hourCycle === "h11" || ro.hourCycle === "h12") return true;
+      if (typeof ro.hour12 === "boolean") return ro.hour12;
+    } catch {
+      /* fall through */
+    }
+    // If browser still reports US English with system 24h clocks, many still get h12 —
+    // default to 24h when language is not a known 12h region.
+    const lang = (navigator.language || "").toLowerCase();
+    return /^(en-us|en-ca|en-ph|en-au|en-nz)\b/.test(lang);
+  }
+
+  function timeFormatOpts(): Intl.DateTimeFormatOptions {
+    return preferHour12()
+      ? { hour: "numeric", minute: "2-digit", hour12: true }
+      : { hour: "2-digit", minute: "2-digit", hour12: false };
+  }
+
+  /** Locale first day of week: 0=Sunday … 6=Saturday (Date.getDay() style). */
+  function localeWeekStart(): number {
+    if (portalUi.weekStart === "monday") return 1;
+    if (portalUi.weekStart === "sunday") return 0;
+    const tags = [...(navigator.languages?.length ? navigator.languages : []), navigator.language].filter(
+      Boolean,
+    ) as string[];
+    for (const tag of tags) {
+      try {
+        const loc = new Intl.Locale(tag);
+        const wi =
+          typeof (loc as Intl.Locale & { getWeekInfo?: () => { firstDay: number } }).getWeekInfo ===
+          "function"
+            ? (loc as Intl.Locale & { getWeekInfo: () => { firstDay: number } }).getWeekInfo()
+            : (loc as Intl.Locale & { weekInfo?: { firstDay?: number } }).weekInfo;
+        // weekInfo.firstDay: 1=Monday … 7=Sunday
+        const fd = wi?.firstDay;
+        if (typeof fd === "number") {
+          return fd === 7 ? 0 : fd;
+        }
+      } catch {
+        /* try next tag */
+      }
+    }
+    // Fallback by language/region (not browser clock settings)
+    const lang = (navigator.language || "en").toLowerCase();
+    if (/^(en-us|en-ca|en-ph|ja|zh|ko|he|ar)\b/.test(lang)) return 0;
+    return 1; // Monday default (EU and most of world)
+  }
+
+  function localeDowLabels(): string[] {
+    // Short weekday names in locale order starting at localeWeekStart
+    const start = localeWeekStart();
+    // 2024-01-07 is a Sunday
+    const base = new Date(2024, 0, 7 + start);
+    const labels: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      labels.push(d.toLocaleDateString(undefined, { weekday: "short" }));
+    }
+    return labels;
+  }
+
+  /** Round date up to next stepMinutes boundary (default 15). */
+  function roundUpTime(d: Date, stepMinutes = 15): Date {
+    const step = stepMinutes * 60 * 1000;
+    const t = d.getTime();
+    if (t % step === 0) return new Date(t);
+    return new Date(Math.ceil(t / step) * step);
+  }
+
+  function formatLocalDtValue(d: Date): string {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function formatDtDisplay(value: string, allDay: boolean): string {
+    if (!value) return "Select…";
+    if (allDay || /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const day = value.slice(0, 10);
+      const [ys, ms, ds] = day.split("-").map(Number);
+      const d = new Date(ys, ms - 1, ds);
+      return d.toLocaleDateString(undefined, {
+        weekday: "short",
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+    }
+    const d = new Date(value.includes("T") && value.length === 16 ? value : value);
+    if (Number.isNaN(d.getTime())) return value;
+    return d.toLocaleString(undefined, {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      ...timeFormatOpts(),
+    });
+  }
+
+  function parseDtParts(value: string): { date: string; hm: string } {
+    if (!value) {
+      const n = roundUpTime(new Date());
+      return { date: ymd(n), hm: `${String(n.getHours()).padStart(2, "0")}:${String(n.getMinutes()).padStart(2, "0")}` };
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return { date: value, hm: "09:00" };
+    }
+    const d = new Date(value.length === 16 ? value : value);
+    if (Number.isNaN(d.getTime())) {
+      return { date: value.slice(0, 10), hm: "09:00" };
+    }
+    return {
+      date: ymd(d),
+      hm: `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
+    };
+  }
+
+  /** Default timed range: now rounded up → +1 hour (or 09:00–10:00 on another day). */
+  function defaultTimedRange(dayYmd?: string): { start: string; end: string } {
+    const now = new Date();
+    const today = ymd(now);
+    if (dayYmd && dayYmd !== today) {
+      const [ys, ms, ds] = dayYmd.split("-").map(Number);
+      const s = new Date(ys, ms - 1, ds, 9, 0, 0, 0);
+      const e = new Date(ys, ms - 1, ds, 10, 0, 0, 0);
+      return { start: formatLocalDtValue(s), end: formatLocalDtValue(e) };
+    }
+    const s = roundUpTime(now, 15);
+    const e = new Date(s.getTime() + 60 * 60 * 1000);
+    return { start: formatLocalDtValue(s), end: formatLocalDtValue(e) };
+  }
+
+  function timeSlotList(): string[] {
+    const slots: string[] = [];
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < 60; m += 15) {
+        slots.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
+      }
+    }
+    return slots;
+  }
+
+  function renderPortalDateTimeField(opts: {
+    field: string;
+    name: string;
+    label: string;
+    value: string;
+    dateOnly?: boolean;
+    required?: boolean;
+    disabled?: boolean;
+    allowClear?: boolean;
+  }): string {
+    const {
+      field,
+      name,
+      label,
+      value,
+      dateOnly = false,
+      required,
+      disabled,
+      allowClear = true,
+    } = opts;
+    const open = eventDtPicker?.field === field;
+    const display = formatDtDisplay(value, dateOnly);
+    return `<div class="dt-field${open ? " is-open" : ""}" data-dt-id="${esc(field)}">
+      <span class="dt-field-label">${esc(label)}</span>
+      <input type="hidden" name="${esc(name)}" value="${esc(value)}" ${required ? "required" : ""} />
+      <button type="button" class="dt-trigger" data-action="dt-open" data-dt-field="${esc(field)}"
+        data-dt-name="${esc(name)}" data-dt-date-only="${dateOnly ? "1" : "0"}" data-dt-clear="${allowClear ? "1" : "0"}"
+        ${disabled ? "disabled" : ""} aria-expanded="${open}">
+        <span class="dt-trigger-text">${esc(display)}</span>
+        <span class="dt-trigger-icon" aria-hidden="true">▾</span>
+      </button>
+      ${
+        open && !disabled
+          ? renderPortalDateTimePopover(field, value, dateOnly, allowClear)
+          : ""
+      }
+    </div>`;
+  }
+
+  function getDtFieldCurrentValue(field: string): string {
+    if (field === "start") return String(editingEvent?.start || "");
+    if (field === "end") return String(editingEvent?.end || "");
+    if (field === "until") {
+      return (
+        editingEvent?.repeat?.until ||
+        toDateInputValue(editingEvent?.start) ||
+        ymd(new Date())
+      );
+    }
+    if (field === "due") return toLocalInputValue(editingTask?.due);
+    if (field === "dtstart") return toLocalInputValue(editingNote?.dtstart);
+    if (field === "bulk-due") return bulkDueValue;
+    if (field === "birthday") return String(editingContact?.birthday || "");
+    return "";
+  }
+
+  function setDtFieldValue(field: string, value: string | null): void {
+    if (field === "start" && editingEvent) {
+      editingEvent = { ...editingEvent, start: value || "" };
+      return;
+    }
+    if (field === "end" && editingEvent) {
+      editingEvent = { ...editingEvent, end: value };
+      return;
+    }
+    if (field === "until" && editingEvent) {
+      editingEvent = {
+        ...editingEvent,
+        repeat: {
+          ...(editingEvent.repeat ?? defaultRepeat()),
+          until: value,
+          endMode: "until",
+        },
+      };
+      return;
+    }
+    if (field === "due" && editingTask) {
+      // Store ISO when timed local value set; null clears
+      if (value === null || value === "") {
+        editingTask = { ...editingTask, due: null };
+      } else if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        editingTask = { ...editingTask, due: new Date(value + "T00:00:00").toISOString() };
+      } else {
+        const d = new Date(value.length === 16 ? value : value);
+        editingTask = {
+          ...editingTask,
+          due: Number.isNaN(d.getTime()) ? value : d.toISOString(),
+        };
+      }
+      return;
+    }
+    if (field === "dtstart" && editingNote) {
+      if (value === null || value === "") {
+        editingNote = { ...editingNote, dtstart: null };
+      } else if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        editingNote = { ...editingNote, dtstart: new Date(value + "T00:00:00").toISOString() };
+      } else {
+        const d = new Date(value.length === 16 ? value : value);
+        editingNote = {
+          ...editingNote,
+          dtstart: Number.isNaN(d.getTime()) ? value : d.toISOString(),
+        };
+      }
+      return;
+    }
+    if (field === "birthday" && editingContact) {
+      editingContact = {
+        ...editingContact,
+        birthday: value && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null,
+      };
+      return;
+    }
+    if (field === "bulk-due") {
+      bulkDueValue = value || "";
+    }
+  }
+
+  function renderPortalDateTimePopover(
+    field: string,
+    value: string,
+    dateOnly: boolean,
+    allowClear: boolean,
+  ): string {
+    const parts = parseDtParts(value);
+    const viewY = eventDtPicker?.viewY ?? Number(parts.date.slice(0, 4));
+    const viewM = eventDtPicker?.viewM ?? Number(parts.date.slice(5, 7)) - 1;
+    const weekStart = localeWeekStart();
+    const dowLabels = localeDowLabels();
+    const first = new Date(viewY, viewM, 1);
+    const startPad = (first.getDay() - weekStart + 7) % 7;
+    const daysInMonth = new Date(viewY, viewM + 1, 0).getDate();
+    const prevDays = new Date(viewY, viewM, 0).getDate();
+    const selectedDate = parts.date;
+    const selectedHm = parts.hm;
+    const title = new Date(viewY, viewM, 1).toLocaleString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+    const cells: string[] = [];
+    const total = Math.ceil((startPad + daysInMonth) / 7) * 7;
+    for (let i = 0; i < total; i++) {
+      let dayNum: number;
+      let cellDate: Date;
+      let outside = false;
+      if (i < startPad) {
+        dayNum = prevDays - startPad + i + 1;
+        cellDate = new Date(viewY, viewM - 1, dayNum);
+        outside = true;
+      } else if (i >= startPad + daysInMonth) {
+        dayNum = i - (startPad + daysInMonth) + 1;
+        cellDate = new Date(viewY, viewM + 1, dayNum);
+        outside = true;
+      } else {
+        dayNum = i - startPad + 1;
+        cellDate = new Date(viewY, viewM, dayNum);
+      }
+      const key = ymd(cellDate);
+      const isSel = key === selectedDate;
+      const isToday = key === ymd(new Date());
+      cells.push(
+        `<button type="button" class="dt-day${outside ? " is-outside" : ""}${isSel ? " is-selected" : ""}${isToday ? " is-today" : ""}" data-action="dt-pick-day" data-dt-field="${field}" data-day="${esc(key)}">${dayNum}</button>`,
+      );
+    }
+    const timeList = dateOnly
+      ? ""
+      : `<div class="dt-times" role="listbox" aria-label="Time">
+          ${timeSlotList()
+            .map((hm) => {
+              const label = (() => {
+                const [h, m] = hm.split(":").map(Number);
+                const d = new Date(2000, 0, 1, h, m);
+                return d.toLocaleTimeString(undefined, timeFormatOpts());
+              })();
+              return `<button type="button" class="dt-time${hm === selectedHm ? " is-selected" : ""}" data-action="dt-pick-time" data-dt-field="${field}" data-hm="${hm}" role="option" aria-selected="${hm === selectedHm}">${esc(label)}</button>`;
+            })
+            .join("")}
+        </div>`;
+    // Fixed position is applied after render (positionDtPopovers) so it isn't clipped by the modal
+    return `<div class="dt-popover" data-dt-popover="${field}" role="dialog" aria-label="Choose date${dateOnly ? "" : " and time"}">
+      <div class="dt-popover-inner${dateOnly ? " is-date-only" : ""}">
+        <div class="dt-cal">
+          <div class="dt-cal-toolbar">
+            <button type="button" class="btn btn-ghost btn-small" data-action="dt-month-prev" data-dt-field="${field}" aria-label="Previous month">‹</button>
+            <span class="dt-cal-title">${esc(title)}</span>
+            <button type="button" class="btn btn-ghost btn-small" data-action="dt-month-next" data-dt-field="${field}" aria-label="Next month">›</button>
+          </div>
+          <div class="dt-dow-row">${dowLabels.map((l) => `<span class="dt-dow">${esc(l)}</span>`).join("")}</div>
+          <div class="dt-days">${cells.join("")}</div>
+          <div class="dt-cal-footer">
+            <button type="button" class="btn btn-ghost btn-small" data-action="dt-clear" data-dt-field="${esc(field)}" ${allowClear ? "" : "disabled"}>Clear</button>
+            <button type="button" class="btn btn-ghost btn-small" data-action="dt-today" data-dt-field="${field}">Today</button>
+          </div>
+        </div>
+        ${timeList}
+      </div>
+    </div>`;
+  }
+
+  /** Place open date/time popovers in the viewport (avoid modal overflow clipping). */
+  function positionDtPopovers() {
+    root.querySelectorAll<HTMLElement>(".dt-field.is-open").forEach((field) => {
+      const trigger = field.querySelector<HTMLElement>(".dt-trigger");
+      const pop = field.querySelector<HTMLElement>(".dt-popover");
+      if (!trigger || !pop) return;
+      const r = trigger.getBoundingClientRect();
+      const margin = 8;
+      // Measure after making visible with fixed coords
+      pop.style.position = "fixed";
+      pop.style.visibility = "hidden";
+      pop.style.top = "0";
+      pop.style.left = "0";
+      const pw = pop.offsetWidth || 320;
+      const ph = pop.offsetHeight || 300;
+      let top = r.bottom + 6;
+      if (top + ph > window.innerHeight - margin) {
+        top = Math.max(margin, r.top - ph - 6);
+      }
+      let left = r.left;
+      if (left + pw > window.innerWidth - margin) {
+        left = Math.max(margin, window.innerWidth - pw - margin);
+      }
+      if (left < margin) left = margin;
+      pop.style.top = `${Math.round(top)}px`;
+      pop.style.left = `${Math.round(left)}px`;
+      pop.style.right = "auto";
+      pop.style.visibility = "visible";
+      pop.style.zIndex = "200";
+    });
+  }
+
+  function defaultRepeat(): {
+    freq: string;
+    interval: number;
+    until: string | null;
+    count: number | null;
+    byDay: string[];
+    endMode: "never" | "until" | "count";
+  } {
+    return { freq: "", interval: 1, until: null, count: null, byDay: [], endMode: "never" };
+  }
+
+  function repeatEndMode(rep: {
+    until?: string | null;
+    count?: number | null;
+    endMode?: "never" | "until" | "count";
+  }): "never" | "until" | "count" {
+    if (rep.endMode === "until" || rep.endMode === "count" || rep.endMode === "never") {
+      return rep.endMode;
+    }
+    if (rep.until) return "until";
+    if (rep.count) return "count";
+    return "never";
+  }
+
+  function renderEventModal(): string {
+    if (!eventModalOpen || !editingEvent) return "";
+    const e = editingEvent;
+    const rep = e.repeat ?? defaultRepeat();
+    const freq = (rep.freq || "").toUpperCase();
+    const writableCals = calendars.filter((c) => c.canShare || c.access === "readwrite");
+    const calOpts = calendars
+      .filter((c) => {
+        if (c.id === e.instanceId) return true;
+        if (c.readOnly) return false;
+        return c.canShare || c.access === "readwrite";
+      })
+      .map(
+        (c) =>
+          `<option value="${c.id}" ${c.id === e.instanceId ? "selected" : ""}>${esc(c.displayname)}</option>`,
+      )
+      .join("");
+    const ro = e.readOnly || !e.canWrite;
+    // Timed values must be datetime-local; if still date-only after toggle, use span conversion
+    let startVal: string;
+    let endVal: string;
+    if (e.allDay) {
+      startVal = toDateInputValue(e.start);
+      endVal = toDateInputValue(e.end);
+    } else {
+      const s = e.start || "";
+      const en = e.end || "";
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const conv = convertAllDaySpanToTimed(s, en || null);
+        startVal = conv.start;
+        endVal = conv.end || "";
+      } else {
+        startVal = toLocalInputValue(e.start);
+        endVal = toLocalInputValue(e.end);
+      }
+    }
+    const weekDays: { code: string; label: string }[] = [
+      { code: "MO", label: "Mon" },
+      { code: "TU", label: "Tue" },
+      { code: "WE", label: "Wed" },
+      { code: "TH", label: "Thu" },
+      { code: "FR", label: "Fri" },
+      { code: "SA", label: "Sat" },
+      { code: "SU", label: "Sun" },
+    ];
+    const byDay = new Set((rep.byDay || []).map((d) => d.toUpperCase()));
+    const endMode = repeatEndMode(rep);
+    // Series end date (Until) replaces the event End control; Start stays editable
+    const endDisabledByRepeat = !!freq && endMode === "until";
+    const untilVal = rep.until || (endMode === "until" ? toDateInputValue(e.start) || ymd(new Date()) : "");
+    return `<div class="cal-modal" id="event-edit-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title">
+      <div class="cal-modal-backdrop" data-action="close-event-modal"></div>
+      <div class="cal-modal-card">
+        <header class="cal-modal-header">
+          <h3 id="event-modal-title">${creatingEvent ? "New event" : "Edit event"}</h3>
+          <button type="button" class="info-modal-close" data-action="close-event-modal" aria-label="Close">×</button>
+        </header>
+        <div class="cal-modal-body">
+          ${renderFlashBanner()}
+          ${
+            !creatingEvent && (e.hasRrule || freq)
+              ? `<p class="muted small" style="margin:0 0 0.75rem">Repeat rules apply to the whole series (CalDAV RRULE).</p>`
+              : ""
+          }
+          ${ro ? `<p class="muted small" style="margin:0 0 0.75rem"><strong>Read-only:</strong> you cannot edit or delete this event.</p>` : ""}
+          <form class="stack" data-form="edit-event">
+            <label>Calendar
+              <select name="instanceId" ${ro || writableCals.length === 0 ? "disabled" : ""}>
+                ${calOpts || `<option value="${e.instanceId}">${esc(e.calendarName)}</option>`}
+              </select>
+            </label>
+            <label>Title
+              <input type="text" name="summary" required maxlength="500" value="${esc(e.summary)}" ${ro ? "readonly" : ""} />
+            </label>
+            <label>Location
+              <input type="text" name="location" maxlength="500" value="${esc(e.location)}" ${ro ? "readonly" : ""} />
+            </label>
+            <label>Description
+              <textarea name="description" rows="4" maxlength="20000" ${ro ? "readonly" : ""}>${esc(e.description)}</textarea>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" name="allDay" data-action="event-allday-toggle" ${e.allDay ? "checked" : ""} ${ro ? "disabled" : ""} />
+              All-day event
+            </label>
+            <div class="form-grid form-grid-2 dt-fields-row">
+              ${renderPortalDateTimeField({
+                field: "start",
+                name: "start",
+                label: "Start",
+                value: startVal,
+                dateOnly: e.allDay,
+                required: true,
+                disabled: ro,
+                allowClear: false,
+              })}
+              ${renderPortalDateTimeField({
+                field: "end",
+                name: "end",
+                label: "End",
+                value: endVal,
+                dateOnly: e.allDay,
+                disabled: ro || endDisabledByRepeat,
+                allowClear: !endDisabledByRepeat,
+              })}
+            </div>
+            <fieldset class="event-repeat" ${ro ? "disabled" : ""}>
+              <legend class="event-repeat-legend">Repeat</legend>
+              <div class="form-grid form-grid-2">
+                <label>Frequency
+                  <select name="repeatFreq" data-action="event-repeat-freq">
+                    <option value="" ${!freq ? "selected" : ""}>Does not repeat</option>
+                    <option value="DAILY" ${freq === "DAILY" ? "selected" : ""}>Daily</option>
+                    <option value="WEEKLY" ${freq === "WEEKLY" ? "selected" : ""}>Weekly</option>
+                    <option value="MONTHLY" ${freq === "MONTHLY" ? "selected" : ""}>Monthly</option>
+                    <option value="YEARLY" ${freq === "YEARLY" ? "selected" : ""}>Yearly</option>
+                  </select>
+                </label>
+                <label>Every
+                  <input type="number" name="repeatInterval" min="1" max="99" value="${esc(String(rep.interval || 1))}" ${!freq ? "disabled" : ""} />
+                </label>
+              </div>
+              ${
+                freq === "WEEKLY"
+                  ? `<div class="event-byday" role="group" aria-label="Days of week">
+                      ${weekDays
+                        .map(
+                          (d) =>
+                            `<label class="checkbox event-byday-item">
+                              <input type="checkbox" name="repeatByDay" value="${d.code}" ${byDay.has(d.code) ? "checked" : ""} />
+                              ${d.label}
+                            </label>`,
+                        )
+                        .join("")}
+                    </div>`
+                  : ""
+              }
+              ${
+                freq
+                  ? `<div class="form-grid form-grid-2" style="margin-top:0.5rem">
+                      <label>Ends
+                        <select name="repeatEndMode" data-action="event-repeat-end">
+                          <option value="never" ${endMode === "never" ? "selected" : ""}>Never</option>
+                          <option value="until" ${endMode === "until" ? "selected" : ""}>On date</option>
+                          <option value="count" ${endMode === "count" ? "selected" : ""}>After count</option>
+                        </select>
+                      </label>
+                      ${
+                        endMode === "until"
+                          ? renderPortalDateTimeField({
+                              field: "until",
+                              name: "repeatUntil",
+                              label: "Until",
+                              value: untilVal,
+                              dateOnly: true,
+                              disabled: ro,
+                              allowClear: true,
+                            })
+                          : endMode === "count"
+                            ? `<label>Occurrences
+                                <input type="number" name="repeatCount" min="1" max="999" value="${esc(String(rep.count || 10))}" />
+                              </label>`
+                            : `<span></span>`
+                      }
+                    </div>`
+                  : ""
+              }
+            </fieldset>
+            <div class="form-actions-row" style="margin-top:0.5rem">
+              ${
+                !ro
+                  ? `<button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>${creatingEvent ? "Create event" : "Save event"}</button>
+                     ${
+                       !creatingEvent
+                         ? `<button type="button" class="btn btn-danger" data-action="delete-event" ${busy ? "disabled" : ""}>Delete</button>`
+                         : ""
+                     }`
+                  : ""
+              }
+              <button type="button" class="btn btn-ghost" data-action="close-event-modal">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function blankEventForDay(day: string, instanceId: number): CalendarEventDetail {
+    const cal = calendars.find((c) => c.id === instanceId);
+    return {
+      uri: "",
+      instanceId,
+      calendarId: cal?.calendarId ?? 0,
+      calendarName: cal?.displayname ?? "Calendar",
+      calendarUri: cal?.uri ?? "",
+      uid: "",
+      summary: "",
+      description: "",
+      location: "",
+      start: day,
+      end: day,
+      allDay: true,
+      hasRrule: false,
+      repeat: defaultRepeat(),
+      readOnly: false,
+      canWrite: true,
+    };
   }
 
   async function loadContacts(abId: number) {
@@ -583,6 +1356,7 @@ export function mountApp(root: HTMLElement): void {
       phones: Array.isArray(contact.phones) ? contact.phones : [],
       custom: Array.isArray(contact.custom) ? contact.custom : [],
       address: contact.address ?? emptyAddress(),
+      birthday: contact.birthday ?? null,
     };
     // Prefer photo endpoint over embedded data URI (smaller JSON, consistent cache)
     photoPreview =
@@ -592,11 +1366,13 @@ export function mountApp(root: HTMLElement): void {
         : null);
     photoBase64Pending = null;
     removePhotoPending = false;
+    contactModalOpen = true;
   }
 
   function startNewContact() {
     creatingContact = true;
     selectedContactUri = null;
+    contactModalOpen = true;
     editingContact = {
       uri: "",
       displayname: "",
@@ -608,6 +1384,7 @@ export function mountApp(root: HTMLElement): void {
       emails: [""],
       phones: [{ type: "cell", value: "" }],
       address: { street: "", city: "", region: "", postal: "", country: "" },
+      birthday: null,
       url: "",
       note: "",
       custom: [],
@@ -652,8 +1429,16 @@ export function mountApp(root: HTMLElement): void {
           <a class="brand" href="/portal/">${brand}</a>
         </nav>`;
 
-    // When calendar edit modal is open, flash is rendered inside the modal instead
-    const flashOnMain = !(calModalOpen || deleteConfirmId !== null);
+    // When calendar/event/contact/AB modals are open, flash is rendered inside the modal instead
+    const flashOnMain = !(
+      calModalOpen ||
+      createCalModalOpen ||
+      deleteConfirmId !== null ||
+      deleteAbConfirmId !== null ||
+      eventModalOpen ||
+      contactModalOpen ||
+      abModalOpen
+    );
     const flashHtml = flashOnMain ? renderFlashBanner() : "";
 
     const footer = `
@@ -669,7 +1454,12 @@ export function mountApp(root: HTMLElement): void {
         </div>
       </footer>`;
 
-    document.body.className = opts.auth ? "layout-auth" : "";
+    // Preserve layout-* toggles applied after shell (e.g. layout-contacts); auth replaces them.
+    if (opts.auth) {
+      document.body.className = "layout-auth";
+    } else {
+      document.body.classList.remove("layout-auth");
+    }
 
     return `${nav}
       <main class="container">
@@ -810,7 +1600,14 @@ export function mountApp(root: HTMLElement): void {
               <div class="cal-modal-body">
                 ${renderFlashBanner()}
                 <section>
-                  ${infoTitle("Calendar details", "calendar-details")}
+                  <p class="muted small mono" style="margin:0">
+                    ${esc(selected.uri)}
+                    <button type="button" class="info-btn" data-action="info" data-info="calendar-details"
+                      aria-label="About calendar details" title="About calendar details"
+                      style="vertical-align:middle;margin-left:0.35rem">
+                      <span aria-hidden="true">i</span>
+                    </button>
+                  </p>
                   <form class="stack" data-form="edit-cal" style="margin-top:1rem">
                     <label>
                       Display name
@@ -837,28 +1634,6 @@ export function mountApp(root: HTMLElement): void {
                       <span class="muted small mono">${esc(selected.uri)}</span>
                     </div>
                   </form>
-                  <div class="import-export" style="margin-top:1.35rem">
-                    ${infoTitle("Import / export", "import-export")}
-                    ${
-                      selected.readOnly
-                        ? `<p class="muted small" style="margin-top:0.5rem"><strong>Read-only:</strong> import disabled.</p>`
-                        : ""
-                    }
-                    <div class="form-actions-row" style="margin-top:0.75rem">
-                      <button type="button" class="btn" data-action="export-cal" ${busy ? "disabled" : ""}>Export .ics</button>
-                      <label class="btn btn-ghost file-btn" ${busy || selected.readOnly ? "aria-disabled=true" : ""}>
-                        Import .ics
-                        <input type="file" accept=".ics,text/calendar,text/plain" data-action="import-cal" ${busy || selected.readOnly ? "disabled" : ""} hidden />
-                      </label>
-                    </div>
-                    ${
-                      lastImportResult
-                        ? `<div class="flash flash-${lastImportResult.ok ? "success" : "error"} import-result" role="status">
-                            <strong>Import result:</strong> ${esc(lastImportResult.message)}
-                          </div>`
-                        : ""
-                    }
-                  </div>
                 </section>
                 <section style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--border)">
                   ${infoTitle(`Share “${selected.displayname}”`, "share")}
@@ -895,6 +1670,28 @@ export function mountApp(root: HTMLElement): void {
                       <tbody>${shareRows}</tbody>
                     </table>
                   </div>
+                </section>
+                <section class="import-export" style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--border)">
+                  ${infoTitle("Import / export", "import-export")}
+                  ${
+                    selected.readOnly
+                      ? `<p class="muted small" style="margin-top:0.5rem"><strong>Read-only:</strong> import disabled.</p>`
+                      : ""
+                  }
+                  <div class="form-actions-row" style="margin-top:0.75rem">
+                    <button type="button" class="btn" data-action="export-cal" ${busy ? "disabled" : ""}>Export .ics</button>
+                    <label class="btn btn-ghost file-btn" ${busy || selected.readOnly ? "aria-disabled=true" : ""}>
+                      Import .ics
+                      <input type="file" accept=".ics,text/calendar,text/plain" data-action="import-cal" ${busy || selected.readOnly ? "disabled" : ""} hidden />
+                    </label>
+                  </div>
+                  ${
+                    lastImportResult
+                      ? `<div class="flash flash-${lastImportResult.ok ? "success" : "error"} import-result" role="status">
+                          <strong>Import result:</strong> ${esc(lastImportResult.message)}
+                        </div>`
+                      : ""
+                  }
                 </section>
               </div>
               <footer class="cal-modal-footer">
@@ -934,81 +1731,115 @@ export function mountApp(root: HTMLElement): void {
         </div>`
       : "";
 
+    const createCalModal = createCalModalOpen
+      ? `<div class="cal-modal" id="cal-create-modal" role="dialog" aria-modal="true" aria-labelledby="cal-create-title">
+          <div class="cal-modal-backdrop" data-action="close-create-cal-modal"></div>
+          <div class="cal-modal-card">
+            <header class="cal-modal-header">
+              <h3 id="cal-create-title">Add calendar</h3>
+              <button type="button" class="info-modal-close" data-action="close-create-cal-modal" aria-label="Close">×</button>
+            </header>
+            <div class="cal-modal-body">
+              ${renderFlashBanner()}
+              <p class="muted small" style="margin:0 0 0.75rem">
+                Create a personal calendar, optional holidays feed, or a read-only calendar.
+                <button type="button" class="info-btn" data-action="info" data-info="add-calendar"
+                  aria-label="About add calendar" title="About add calendar"
+                  style="vertical-align:middle;margin-left:0.25rem">
+                  <span aria-hidden="true">i</span>
+                </button>
+              </p>
+              <form class="stack" data-form="create-cal">
+                <label>
+                  Display name
+                  <input type="text" name="displayname" id="create-displayname" maxlength="200" placeholder="Work" autocomplete="off" />
+                </label>
+                <label>
+                  Color
+                  <span class="color-field">
+                    <input type="color" name="color_picker" value="#3B82F6" aria-label="New calendar color" />
+                    <input type="text" name="color" class="mono" maxlength="9" value="#3B82F6" placeholder="#3B82F6" />
+                  </span>
+                </label>
+                <label>
+                  Description
+                  <textarea name="description" rows="2" maxlength="2000" placeholder="Optional"></textarea>
+                </label>
+                <label class="checkbox">
+                  <input type="checkbox" name="holidays" data-action="toggle-holidays" />
+                  Holidays calendar
+                </label>
+                <label class="holidays-country" id="holidays-country-wrap" hidden>
+                  Country
+                  <select name="holidayCountry" id="holiday-country">
+                    <option value="">Select country…</option>
+                    ${holidayCountries
+                      .map(
+                        (c) =>
+                          `<option value="${esc(c.code)}">${esc(c.name)} (${esc(c.code)})</option>`,
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <label class="checkbox">
+                  <input type="checkbox" name="readOnly" />
+                  Read-only (for everyone)
+                </label>
+                <div class="form-actions-row form-actions-wrap">
+                  <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Create calendar</button>
+                  <button type="button" class="btn btn-ghost" data-action="close-create-cal-modal" ${busy ? "disabled" : ""}>Cancel</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>`
+      : "";
+
     const calendarsTab = `
       <div class="portal-grid portal-grid-calendars">
-        <section class="card">
-          ${infoTitle("Owned", "owned")}
-          <div class="cal-list" style="margin-top:0.75rem">
-            ${calRows || '<p class="muted">No calendars yet. Add one below.</p>'}
-          </div>
-
-          <div style="margin-top:1.35rem">
-            ${infoTitle("Add calendar", "add-calendar")}
-          </div>
-          <form class="stack stack-tight" data-form="create-cal" style="margin-top:0.75rem">
-            <label>
-              Display name
-              <input type="text" name="displayname" id="create-displayname" maxlength="200" placeholder="Work" autocomplete="off" />
-            </label>
-            <label>
-              Color
-              <span class="color-field">
-                <input type="color" name="color_picker" value="#3B82F6" aria-label="New calendar color" />
-                <input type="text" name="color" class="mono" maxlength="9" value="#3B82F6" placeholder="#3B82F6" />
-              </span>
-            </label>
-            <label>
-              Description
-              <textarea name="description" rows="2" maxlength="2000" placeholder="Optional"></textarea>
-            </label>
-            <label class="checkbox">
-              <input type="checkbox" name="holidays" data-action="toggle-holidays" />
-              Holidays calendar
-            </label>
-            <label class="holidays-country" id="holidays-country-wrap" hidden>
-              Country
-              <select name="holidayCountry" id="holiday-country">
-                <option value="">Select country…</option>
-                ${holidayCountries
-                  .map(
-                    (c) =>
-                      `<option value="${esc(c.code)}">${esc(c.name)} (${esc(c.code)})</option>`,
-                  )
-                  .join("")}
-              </select>
-            </label>
-            <label class="checkbox">
-              <input type="checkbox" name="readOnly" />
-              Read-only (for everyone)
-            </label>
-            <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Create calendar</button>
-          </form>
-
-          ${
-            sharedWithMe.length
-              ? `<div style="margin-top:1.25rem">
-                   ${infoTitle("Shared with me", "shared-with-me")}
-                   <div class="cal-list" style="margin-top:0.75rem">${sharedRows}</div>
-                 </div>`
-              : ""
-          }
-        </section>
+        <aside class="calendars-sidebar">
+          <section class="card calendars-sidebar-card">
+            <div class="calendars-sidebar-head">
+              ${infoTitle("Owned", "owned")}
+            </div>
+            <div class="cal-list calendars-owned-list">
+              ${calRows || '<p class="muted">No calendars yet. Create one below.</p>'}
+              ${
+                sharedWithMe.length
+                  ? `<div class="calendars-shared-block">
+                       ${infoTitle("Shared with me", "shared-with-me")}
+                       <div class="cal-list" style="margin-top:0.75rem">${sharedRows}</div>
+                     </div>`
+                  : ""
+              }
+            </div>
+            <div class="calendars-sidebar-create">
+              <button type="button" class="btn btn-primary" style="width:100%" data-action="open-create-cal-modal" ${busy ? "disabled" : ""}>Create calendar</button>
+            </div>
+          </section>
+        </aside>
         ${renderMonthGrid()}
       </div>
+      ${createCalModal}
       ${calModal}
-      ${deleteModal}`;
+      ${deleteModal}
+      ${renderEventModal()}`;
 
     const abRows = addressBooks
       .map((a) => {
         const active = a.id === selectedAbId ? " is-selected" : "";
-        return `<button type="button" class="cal-row${active}" data-action="select-ab" data-id="${a.id}">
+        return `<div class="cal-row${active}" data-action="select-ab" data-id="${a.id}" role="button" tabindex="0">
           <span class="cal-swatch cal-swatch-empty"></span>
           <span class="cal-row-text">
             <span class="cal-row-title">${esc(a.displayname)}</span>
             <span class="muted small">${a.cardCount} contact${a.cardCount === 1 ? "" : "s"}</span>
             <span class="muted small mono cal-row-uri">${esc(a.uri)}</span>
           </span>
-        </button>`;
+          <span class="cal-row-actions">
+            <button type="button" class="btn btn-small" data-action="edit-ab" data-id="${a.id}" ${busy ? "disabled" : ""}>Edit</button>
+            <button type="button" class="btn btn-small btn-danger" data-action="delete-ab" data-id="${a.id}" ${busy ? "disabled" : ""}>Delete</button>
+          </span>
+        </div>`;
       })
       .join("");
 
@@ -1097,161 +1928,239 @@ export function mountApp(root: HTMLElement): void {
             )
             .join("");
 
-    const contactForm =
-      c && selectedAb
-        ? `<div class="card">
-            ${infoTitle(creatingContact ? "New contact" : "Edit contact", "contacts")}
-            <form class="stack" data-form="contact" style="margin-top:1rem">
-              <div class="contact-photo-row">
-                <div class="contact-photo-preview">
-                  ${
-                    photoPreview
-                      ? `<img src="${esc(photoPreview)}" alt="Contact photo" />`
-                      : `<span class="contact-avatar contact-avatar-fallback contact-avatar-lg" aria-hidden="true">${esc((c.fullname || c.firstname || "?").slice(0, 1).toUpperCase())}</span>`
-                  }
-                </div>
-                <div class="stack stack-tight" style="flex:1">
-                  <label class="btn btn-ghost file-btn" ${busy ? "aria-disabled=true" : ""}>
-                    ${photoPreview ? "Change photo" : "Upload photo"}
-                    <input type="file" accept="image/*" data-action="contact-photo" ${busy ? "disabled" : ""} hidden />
+    const contactModal =
+      contactModalOpen && c && selectedAb
+        ? `<div class="cal-modal" id="contact-edit-modal" role="dialog" aria-modal="true" aria-labelledby="contact-modal-title">
+            <div class="cal-modal-backdrop" data-action="close-contact-modal"></div>
+            <div class="cal-modal-card cal-modal-card-wide">
+              <header class="cal-modal-header">
+                <h3 id="contact-modal-title">${creatingContact ? "New contact" : "Edit contact"}</h3>
+                <button type="button" class="info-modal-close" data-action="close-contact-modal" aria-label="Close">×</button>
+              </header>
+              <div class="cal-modal-body">
+                ${renderFlashBanner()}
+                <form class="stack" data-form="contact">
+                  <div class="contact-photo-row">
+                    <div class="contact-photo-preview">
+                      ${
+                        photoPreview
+                          ? `<img src="${esc(photoPreview)}" alt="Contact photo" />`
+                          : `<span class="contact-avatar contact-avatar-fallback contact-avatar-lg" aria-hidden="true">${esc((c.fullname || c.firstname || "?").slice(0, 1).toUpperCase())}</span>`
+                      }
+                    </div>
+                    <div class="stack stack-tight" style="flex:1">
+                      <label class="btn btn-ghost file-btn" ${busy ? "aria-disabled=true" : ""}>
+                        ${photoPreview ? "Change photo" : "Upload photo"}
+                        <input type="file" accept="image/*" data-action="contact-photo" ${busy ? "disabled" : ""} hidden />
+                      </label>
+                      ${
+                        photoPreview || c.hasPhoto
+                          ? `<button type="button" class="btn btn-ghost btn-small" data-action="remove-photo" ${busy ? "disabled" : ""}>Remove photo</button>`
+                          : ""
+                      }
+                      <span class="muted small">JPEG/PNG, resized to 256px on save.</span>
+                    </div>
+                  </div>
+                  <div class="form-grid form-grid-2">
+                    <label>First name
+                      <input type="text" name="firstname" value="${esc(c.firstname)}" maxlength="200" autocomplete="off" />
+                    </label>
+                    <label>Last name
+                      <input type="text" name="lastname" value="${esc(c.lastname)}" maxlength="200" autocomplete="off" />
+                    </label>
+                  </div>
+                  <label>Full name
+                    <input type="text" name="fullname" value="${esc(c.fullname)}" maxlength="200" placeholder="Auto from first/last if empty" autocomplete="off" />
                   </label>
-                  ${
-                    photoPreview || c.hasPhoto
-                      ? `<button type="button" class="btn btn-ghost btn-small" data-action="remove-photo" ${busy ? "disabled" : ""}>Remove photo</button>`
-                      : ""
-                  }
-                  <span class="muted small">JPEG/PNG, resized to 256px on save.</span>
-                </div>
-              </div>
-              <div class="form-grid form-grid-2">
-                <label>First name
-                  <input type="text" name="firstname" value="${esc(c.firstname)}" maxlength="200" autocomplete="off" />
-                </label>
-                <label>Last name
-                  <input type="text" name="lastname" value="${esc(c.lastname)}" maxlength="200" autocomplete="off" />
-                </label>
-              </div>
-              <label>Full name
-                <input type="text" name="fullname" value="${esc(c.fullname)}" maxlength="200" placeholder="Auto from first/last if empty" autocomplete="off" />
-              </label>
-              <div class="form-grid form-grid-2">
-                <label>Organization
-                  <input type="text" name="org" value="${esc(c.org)}" maxlength="200" autocomplete="off" />
-                </label>
-                <label>Title
-                  <input type="text" name="title" value="${esc(c.title)}" maxlength="200" autocomplete="off" />
-                </label>
-              </div>
-              <div class="form-grid form-grid-2 contact-email-phone">
-                <fieldset class="fieldset">
-                  <legend>Emails</legend>
-                  ${emailRows}
-                  <button type="button" class="btn btn-ghost btn-small" data-action="add-email" ${emails.length >= 10 ? "disabled" : ""}>+ Email</button>
-                </fieldset>
-                <fieldset class="fieldset">
-                  <legend>Phones</legend>
-                  ${phoneRows}
-                  <button type="button" class="btn btn-ghost btn-small" data-action="add-phone" ${phones.length >= 10 ? "disabled" : ""}>+ Phone</button>
-                </fieldset>
-              </div>
-              <fieldset class="fieldset fieldset-address">
-                <legend>Address</legend>
-                <label>Street
-                  <input type="text" name="street" value="${esc(addr.street)}" maxlength="300" autocomplete="off" />
-                </label>
-                <div class="form-grid form-grid-2">
-                  <label>City
-                    <input type="text" name="city" value="${esc(addr.city)}" maxlength="120" autocomplete="off" />
+                  <div class="form-grid form-grid-2">
+                    <label>Organization
+                      <input type="text" name="org" value="${esc(c.org)}" maxlength="200" autocomplete="off" />
+                    </label>
+                    <label>Title
+                      <input type="text" name="title" value="${esc(c.title)}" maxlength="200" autocomplete="off" />
+                    </label>
+                  </div>
+                  <div class="form-grid form-grid-2 contact-email-phone">
+                    <fieldset class="fieldset">
+                      <legend>Emails</legend>
+                      ${emailRows}
+                      <button type="button" class="btn btn-ghost btn-small" data-action="add-email" ${emails.length >= 10 ? "disabled" : ""}>+ Email</button>
+                    </fieldset>
+                    <fieldset class="fieldset">
+                      <legend>Phones</legend>
+                      ${phoneRows}
+                      <button type="button" class="btn btn-ghost btn-small" data-action="add-phone" ${phones.length >= 10 ? "disabled" : ""}>+ Phone</button>
+                    </fieldset>
+                  </div>
+                  <fieldset class="fieldset fieldset-address">
+                    <legend>Address</legend>
+                    <label>Street
+                      <input type="text" name="street" value="${esc(addr.street)}" maxlength="300" autocomplete="off" />
+                    </label>
+                    <div class="form-grid form-grid-2">
+                      <label>City
+                        <input type="text" name="city" value="${esc(addr.city)}" maxlength="120" autocomplete="off" />
+                      </label>
+                      <label>Region
+                        <input type="text" name="region" value="${esc(addr.region)}" maxlength="120" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="form-grid form-grid-2">
+                      <label>Postal code
+                        <input type="text" name="postal" value="${esc(addr.postal)}" maxlength="40" autocomplete="off" />
+                      </label>
+                      <label>Country
+                        <input type="text" name="country" value="${esc(addr.country)}" maxlength="120" autocomplete="off" />
+                      </label>
+                    </div>
+                  </fieldset>
+                  <label>Website
+                    <input type="url" name="url" value="${esc(c.url)}" maxlength="500" placeholder="https://" autocomplete="off" />
                   </label>
-                  <label>Region
-                    <input type="text" name="region" value="${esc(addr.region)}" maxlength="120" autocomplete="off" />
+                  ${renderPortalDateTimeField({
+                    field: "birthday",
+                    name: "birthday",
+                    label: "Birthday",
+                    value: c.birthday || "",
+                    dateOnly: true,
+                    allowClear: true,
+                  })}
+                  <fieldset class="fieldset fieldset-custom">
+                    <legend>Custom fields</legend>
+                    ${customRows}
+                    <button type="button" class="btn btn-ghost btn-small" data-action="add-custom" ${customFields.length >= 30 ? "disabled" : ""}>+ Custom field</button>
+                  </fieldset>
+                  <label>Notes
+                    <textarea name="note" rows="3" maxlength="4000">${esc(c.note)}</textarea>
                   </label>
-                </div>
-                <div class="form-grid form-grid-2">
-                  <label>Postal code
-                    <input type="text" name="postal" value="${esc(addr.postal)}" maxlength="40" autocomplete="off" />
-                  </label>
-                  <label>Country
-                    <input type="text" name="country" value="${esc(addr.country)}" maxlength="120" autocomplete="off" />
-                  </label>
-                </div>
-              </fieldset>
-              <label>Website
-                <input type="url" name="url" value="${esc(c.url)}" maxlength="500" placeholder="https://" autocomplete="off" />
-              </label>
-              <fieldset class="fieldset fieldset-custom">
-                <legend>Custom fields</legend>
-                ${customRows}
-                <button type="button" class="btn btn-ghost btn-small" data-action="add-custom" ${customFields.length >= 30 ? "disabled" : ""}>+ Custom field</button>
-              </fieldset>
-              <label>Notes
-                <textarea name="note" rows="3" maxlength="4000">${esc(c.note)}</textarea>
-              </label>
-              <div class="form-actions-row">
-                <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>${creatingContact ? "Create contact" : "Save contact"}</button>
-                ${
-                  !creatingContact
-                    ? `<button type="button" class="btn btn-danger" data-action="delete-contact" ${busy ? "disabled" : ""}>Delete</button>`
-                    : `<button type="button" class="btn btn-ghost" data-action="cancel-contact" ${busy ? "disabled" : ""}>Cancel</button>`
-                }
-                ${
-                  !creatingContact && c.uri
-                    ? `<span class="muted small mono">${esc(c.uri)}</span>`
-                    : ""
-                }
+                  <div class="form-actions-row form-actions-wrap">
+                    <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>${creatingContact ? "Create contact" : "Save contact"}</button>
+                    ${
+                      !creatingContact && c.uri
+                        ? `<button type="button" class="btn" data-action="export-contact" ${busy ? "disabled" : ""}>Export .vcf</button>`
+                        : ""
+                    }
+                    ${
+                      !creatingContact
+                        ? `<button type="button" class="btn btn-danger" data-action="delete-contact" ${busy ? "disabled" : ""}>Delete</button>`
+                        : ""
+                    }
+                    <button type="button" class="btn btn-ghost" data-action="close-contact-modal" ${busy ? "disabled" : ""}>Cancel</button>
+                    ${
+                      !creatingContact && c.uri
+                        ? `<span class="muted small mono">${esc(c.uri)}</span>`
+                        : ""
+                    }
+                  </div>
+                </form>
               </div>
-            </form>
+            </div>
           </div>`
-        : selectedAb
-          ? `<div class="card"><p class="muted">Select a contact or click <strong>Add contact</strong>.</p></div>`
-          : `<div class="card"><p class="muted">Select or create an address book first.</p></div>`;
+        : "";
 
-    const abManage = selectedAb
-      ? `<section class="card ab-manage">
-          ${infoTitle(selectedAb.displayname, "address-books")}
-          <p class="muted small mono" style="margin:0.25rem 0 0.65rem">${esc(selectedAb.uri)} · ${selectedAb.cardCount} contact${selectedAb.cardCount === 1 ? "" : "s"}</p>
-          <form class="stack stack-tight" data-form="edit-ab">
-            <label>Display name
-              <input type="text" name="displayname" required maxlength="200" value="${esc(selectedAb.displayname)}" />
-            </label>
-            <label>Description
-              <textarea name="description" rows="2" maxlength="2000">${esc(selectedAb.description)}</textarea>
-            </label>
-            <div class="form-actions-row form-actions-wrap">
-              <button type="submit" class="btn btn-primary btn-small" ${busy ? "disabled" : ""}>Save</button>
-              <button type="button" class="btn btn-danger btn-small" data-action="delete-ab" ${busy ? "disabled" : ""}>Delete</button>
+    const abModal =
+      abModalOpen && selectedAb
+        ? `<div class="cal-modal" id="ab-edit-modal" role="dialog" aria-modal="true" aria-labelledby="ab-modal-title">
+            <div class="cal-modal-backdrop" data-action="close-ab-modal"></div>
+            <div class="cal-modal-card">
+              <header class="cal-modal-header">
+                <h3 id="ab-modal-title">Address book details</h3>
+                <button type="button" class="info-modal-close" data-action="close-ab-modal" aria-label="Close">×</button>
+              </header>
+              <div class="cal-modal-body">
+                ${renderFlashBanner()}
+                <section>
+                  <p class="muted small mono" style="margin:0">
+                    ${esc(selectedAb.uri)} · ${selectedAb.cardCount} contact${selectedAb.cardCount === 1 ? "" : "s"}
+                    <button type="button" class="info-btn" data-action="info" data-info="address-books"
+                      aria-label="About address books" title="About address books"
+                      style="vertical-align:middle;margin-left:0.35rem">
+                      <span aria-hidden="true">i</span>
+                    </button>
+                  </p>
+                  <form class="stack" data-form="edit-ab" style="margin-top:1rem">
+                    <label>Display name
+                      <input type="text" name="displayname" required maxlength="200" value="${esc(selectedAb.displayname)}" autocomplete="off" />
+                    </label>
+                    <label>Description
+                      <textarea name="description" rows="3" maxlength="2000" placeholder="Optional notes for this address book">${esc(selectedAb.description)}</textarea>
+                    </label>
+                    <div class="form-actions-row">
+                      <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Save changes</button>
+                      <span class="muted small mono">${esc(selectedAb.uri)}</span>
+                    </div>
+                  </form>
+                  <div class="import-export" style="margin-top:1.35rem">
+                    ${infoTitle("Import / export", "contact-import-export")}
+                    <div class="form-actions-row form-actions-wrap" style="margin-top:0.75rem">
+                      <button type="button" class="btn" data-action="export-ab" ${busy ? "disabled" : ""}>Export .vcf</button>
+                      <label class="btn btn-ghost file-btn" ${busy ? "aria-disabled=true" : ""}>
+                        Import .vcf
+                        <input type="file" accept=".vcf,text/vcard,text/x-vcard,text/plain" data-action="import-ab" ${busy ? "disabled" : ""} hidden />
+                      </label>
+                    </div>
+                    ${
+                      lastContactImportResult
+                        ? `<div class="flash flash-${lastContactImportResult.ok ? "success" : "error"} import-result" role="status">
+                            <strong>Import:</strong> ${esc(lastContactImportResult.message)}
+                          </div>`
+                        : ""
+                    }
+                  </div>
+                </section>
+              </div>
+              <footer class="cal-modal-footer">
+                <button type="button" class="btn btn-ghost" data-action="close-ab-modal">Close</button>
+              </footer>
             </div>
-          </form>
-          <div class="section-divider" style="margin:1rem 0"></div>
-          <div class="import-export">
-            ${infoTitle("Import / export", "contact-import-export")}
-            <div class="form-actions-row form-actions-wrap" style="margin-top:0.55rem">
-              <button type="button" class="btn btn-small" data-action="export-ab" ${busy ? "disabled" : ""}>Export .vcf</button>
-              <label class="btn btn-ghost btn-small file-btn" ${busy ? "aria-disabled=true" : ""}>
-                Import .vcf
-                <input type="file" accept=".vcf,text/vcard,text/x-vcard,text/plain" data-action="import-ab" ${busy ? "disabled" : ""} hidden />
+          </div>`
+        : "";
+
+    const deleteAbTarget =
+      deleteAbConfirmId !== null
+        ? addressBooks.find((a) => a.id === deleteAbConfirmId) ?? null
+        : null;
+    const abDeleteModal = deleteAbTarget
+      ? `<div class="cal-modal" id="ab-delete-modal" role="dialog" aria-modal="true" aria-labelledby="ab-delete-title">
+          <div class="cal-modal-backdrop" data-action="cancel-delete-ab"></div>
+          <div class="cal-modal-card cal-modal-card-sm">
+            <header class="cal-modal-header">
+              <h3 id="ab-delete-title">Delete address book</h3>
+              <button type="button" class="info-modal-close" data-action="cancel-delete-ab" aria-label="Close">×</button>
+            </header>
+            <div class="cal-modal-body">
+              ${renderFlashBanner()}
+              <p>You are about to permanently delete <strong>${esc(deleteAbTarget.displayname)}</strong>
+                <span class="muted small mono">(${esc(deleteAbTarget.uri)})</span>.</p>
+              <p class="muted small">${
+                (deleteAbTarget.cardCount ?? 0) > 0
+                  ? `All ${deleteAbTarget.cardCount} contact${deleteAbTarget.cardCount === 1 ? "" : "s"} in this address book will be removed. This cannot be undone.`
+                  : "This address book is empty. This cannot be undone."
+              }</p>
+              <label class="checkbox" style="margin-top:1rem">
+                <input type="checkbox" id="delete-ab-confirm" data-action="toggle-delete-ab-confirm" />
+                I understand and want to permanently delete this address book
               </label>
             </div>
-            ${
-              lastContactImportResult
-                ? `<div class="flash flash-${lastContactImportResult.ok ? "success" : "error"} import-result" role="status">
-                    <strong>Import:</strong> ${esc(lastContactImportResult.message)}
-                  </div>`
-                : ""
-            }
+            <footer class="cal-modal-footer">
+              <button type="button" class="btn btn-ghost" data-action="cancel-delete-ab" ${busy ? "disabled" : ""}>Cancel</button>
+              <button type="button" class="btn btn-danger" data-action="confirm-delete-ab" data-id="${deleteAbTarget.id}" disabled id="delete-ab-submit">Delete permanently</button>
+            </footer>
           </div>
-        </section>`
+        </div>`
       : "";
 
     const contactsTab = `
       <div class="portal-grid portal-grid-contacts">
-        <div class="contacts-sidebar stack">
-          <section class="card">
-            ${infoTitle("Address books", "address-books")}
-            <div class="cal-list" style="margin-top:0.75rem">
+        <aside class="contacts-sidebar">
+          <section class="card contacts-sidebar-card">
+            <div class="contacts-sidebar-head">
+              ${infoTitle("Address books", "address-books")}
+            </div>
+            <div class="cal-list contacts-ab-list">
               ${abRows || '<p class="muted">No address books yet. Create one below.</p>'}
             </div>
-            <div style="margin-top:1.25rem">
+            <div class="contacts-sidebar-create">
               <h3 class="h3-inline">Add address book</h3>
               <form class="stack stack-tight" data-form="create-ab" style="margin-top:0.5rem">
                 <label>Display name
@@ -1264,19 +2173,20 @@ export function mountApp(root: HTMLElement): void {
               </form>
             </div>
           </section>
-          ${abManage}
-        </div>
-        <section class="stack">
+        </aside>
+        <section class="contacts-main-col">
           ${
             selectedAb
               ? `<div class="card contacts-main-card">
-                  ${infoTitle("Contacts", "contacts")}
-                  <div class="contact-toolbar" style="margin-top:0.75rem">
-                    <input type="search" name="contact-search" data-action="contact-search" placeholder="Search contacts…"
-                      value="${esc(contactSearch)}" aria-label="Search contacts" ${busy ? "disabled" : ""} />
-                    <button type="button" class="btn btn-primary" data-action="new-contact" ${busy ? "disabled" : ""}>Add contact</button>
+                  <div class="contacts-main-head">
+                    ${infoTitle("Contacts", "contacts")}
+                    <div class="contact-toolbar" style="margin-top:0.75rem">
+                      <input type="search" name="contact-search" data-action="contact-search" placeholder="Search contacts…"
+                        value="${esc(contactSearch)}" aria-label="Search contacts" ${busy ? "disabled" : ""} />
+                      <button type="button" class="btn btn-primary" data-action="new-contact" ${busy ? "disabled" : ""}>Add contact</button>
+                    </div>
                   </div>
-                  <div class="contacts-table-wrap" style="margin-top:0.75rem">
+                  <div class="contacts-table-wrap contacts-table-wrap-tall">
                     <table class="contacts-table">
                       <thead>
                         <tr>
@@ -1291,12 +2201,15 @@ export function mountApp(root: HTMLElement): void {
                       </tbody>
                     </table>
                   </div>
+                  <p class="muted small contacts-main-hint">Select a contact to edit, or use <strong>Add contact</strong>.</p>
                 </div>`
-              : `<div class="card"><p class="muted">Select an address book to manage contacts.</p></div>`
+              : `<div class="card contacts-main-card contacts-main-empty"><p class="muted">Select an address book to manage contacts.</p></div>`
           }
-          ${contactForm}
         </section>
-      </div>`;
+      </div>
+      ${abDeleteModal}
+      ${abModal}
+      ${contactModal}`;
 
     const tabInfoKey =
       activeTab === "calendars"
@@ -1347,7 +2260,19 @@ export function mountApp(root: HTMLElement): void {
     `);
     document.body.classList.toggle(
       "cal-modal-open",
-      calModalOpen || deleteConfirmId !== null,
+      calModalOpen ||
+        createCalModalOpen ||
+        deleteConfirmId !== null ||
+        deleteAbConfirmId !== null ||
+        eventModalOpen ||
+        contactModalOpen ||
+        abModalOpen,
+    );
+    document.body.classList.toggle("layout-contacts", activeTab === "contacts");
+    document.body.classList.toggle("layout-calendars", activeTab === "calendars");
+    document.body.classList.toggle(
+      "layout-tasks",
+      activeTab === "tasks" || activeTab === "notes",
     );
   }
 
@@ -1498,42 +2423,56 @@ export function mountApp(root: HTMLElement): void {
             })
             .join("");
 
+    const applyIcon = `<svg class="bulk-apply-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+      <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
+    const bulkApplyBtn = (action: string, label: string) =>
+      `<button type="button" class="btn btn-small bulk-apply-btn" data-action="${action}"
+        title="${esc(label)}" aria-label="${esc(label)}" ${busy || nChecked === 0 ? "disabled" : ""}>${applyIcon}</button>`;
     const bulkBar =
       someChecked
         ? `<div class="bulk-bar" style="margin-top:0.75rem">
-            <div class="bulk-bar-count">
-              <strong>${nChecked}</strong><span class="bulk-bar-count-label">selected</span>${
-                checkedTaskKeys.length !== nChecked
-                  ? `<span class="muted small bulk-bar-count-extra">(${checkedTaskKeys.length - nChecked} read-only skipped)</span>`
-                  : ""
-              }
+            <div class="bulk-bar-row">
+              <div class="bulk-bar-count">
+                <strong>${nChecked}</strong><span class="bulk-bar-count-label">selected</span>${
+                  checkedTaskKeys.length !== nChecked
+                    ? `<span class="muted small bulk-bar-count-extra">(${checkedTaskKeys.length - nChecked} read-only skipped)</span>`
+                    : ""
+                }
+              </div>
+              <div class="bulk-group">
+                <label class="bulk-field">Status
+                  <select id="bulk-task-status" ${busy || nChecked === 0 ? "disabled" : ""}>
+                    <option value="">—</option>
+                    <option value="NEEDS-ACTION">To do</option>
+                    <option value="IN-PROCESS">In progress</option>
+                    <option value="COMPLETED">Done</option>
+                    <option value="CANCELLED">Cancelled</option>
+                  </select>
+                </label>
+                ${bulkApplyBtn("bulk-task-status", "Apply status")}
+              </div>
+              <div class="bulk-group bulk-group-due">
+                ${renderPortalDateTimeField({
+                  field: "bulk-due",
+                  name: "bulkDue",
+                  label: "Due",
+                  value: bulkDueValue,
+                  dateOnly: false,
+                  disabled: busy || nChecked === 0,
+                  allowClear: true,
+                })}
+                ${bulkApplyBtn("bulk-task-due", "Apply due")}
+                <button type="button" class="btn btn-small btn-ghost" data-action="bulk-task-clear-due" ${busy || nChecked === 0 ? "disabled" : ""} title="Clear due date">Clear due</button>
+              </div>
+              <div class="bulk-group">
+                <label class="bulk-field bulk-field-pct">%
+                  <input type="number" id="bulk-task-percent" min="0" max="100" placeholder="0–100" ${busy || nChecked === 0 ? "disabled" : ""} />
+                </label>
+                ${bulkApplyBtn("bulk-task-percent", "Apply %")}
+              </div>
             </div>
-            <div class="bulk-group">
-              <label class="bulk-field">Status
-                <select id="bulk-task-status" ${busy || nChecked === 0 ? "disabled" : ""}>
-                  <option value="">—</option>
-                  <option value="NEEDS-ACTION">To do</option>
-                  <option value="IN-PROCESS">In progress</option>
-                  <option value="COMPLETED">Done</option>
-                  <option value="CANCELLED">Cancelled</option>
-                </select>
-              </label>
-              <button type="button" class="btn btn-small" data-action="bulk-task-status" ${busy || nChecked === 0 ? "disabled" : ""}>Apply status</button>
-            </div>
-            <div class="bulk-group">
-              <label class="bulk-field">Due
-                <input type="datetime-local" id="bulk-task-due" ${busy || nChecked === 0 ? "disabled" : ""} />
-              </label>
-              <button type="button" class="btn btn-small" data-action="bulk-task-due" ${busy || nChecked === 0 ? "disabled" : ""}>Apply due</button>
-              <button type="button" class="btn btn-small btn-ghost" data-action="bulk-task-clear-due" ${busy || nChecked === 0 ? "disabled" : ""} title="Clear due date">Clear due</button>
-            </div>
-            <div class="bulk-group">
-              <label class="bulk-field bulk-field-pct">%
-                <input type="number" id="bulk-task-percent" min="0" max="100" placeholder="0–100" ${busy || nChecked === 0 ? "disabled" : ""} />
-              </label>
-              <button type="button" class="btn btn-small" data-action="bulk-task-percent" ${busy || nChecked === 0 ? "disabled" : ""}>Apply %</button>
-            </div>
-            <div class="bulk-group bulk-group-end">
+            <div class="bulk-bar-actions">
               <button type="button" class="btn btn-small btn-danger" data-action="bulk-task-delete" ${busy || nChecked === 0 ? "disabled" : ""}>Delete</button>
               <button type="button" class="btn btn-small btn-ghost" data-action="bulk-task-clear" ${busy ? "disabled" : ""}>Clear selection</button>
             </div>
@@ -1585,9 +2524,15 @@ export function mountApp(root: HTMLElement): void {
                       .join("")}
                   </select>
                 </label>
-                <label>Due
-                  <input type="datetime-local" name="due" value="${esc(toLocalInputValue(t.due))}" ${t.readOnly && !creatingTask ? "readonly" : ""} />
-                </label>
+                ${renderPortalDateTimeField({
+                  field: "due",
+                  name: "due",
+                  label: "Due",
+                  value: toLocalInputValue(t.due),
+                  dateOnly: false,
+                  disabled: !!(t.readOnly && !creatingTask),
+                  allowClear: true,
+                })}
               </div>
               <div class="form-grid form-grid-2">
                 <label>Priority (0–9)
@@ -1702,9 +2647,15 @@ export function mountApp(root: HTMLElement): void {
               <label>Title
                 <input type="text" name="summary" required maxlength="500" value="${esc(n.summary)}" ${n.readOnly && !creatingNote ? "readonly" : ""} />
               </label>
-              <label>Date
-                <input type="datetime-local" name="dtstart" value="${esc(toLocalInputValue(n.dtstart))}" ${n.readOnly && !creatingNote ? "readonly" : ""} />
-              </label>
+              ${renderPortalDateTimeField({
+                field: "dtstart",
+                name: "dtstart",
+                label: "Date",
+                value: toLocalInputValue(n.dtstart),
+                dateOnly: false,
+                disabled: !!(n.readOnly && !creatingNote),
+                allowClear: true,
+              })}
               <label>Body
                 <textarea name="description" rows="8" maxlength="20000" ${n.readOnly && !creatingNote ? "readonly" : ""}>${esc(n.description)}</textarea>
               </label>
@@ -1757,15 +2708,17 @@ export function mountApp(root: HTMLElement): void {
     </div>`;
   }
 
-  /** Full re-render replaces DOM and would reset scroll; capture/restore so contact clicks stay put. */
+  /** Full re-render replaces DOM and would reset scroll; capture/restore so list clicks stay put. */
   function captureScroll() {
     const table = root.querySelector<HTMLElement>(".contacts-table-wrap");
-    const sidebar = root.querySelector<HTMLElement>(".contacts-sidebar");
+    const abList = root.querySelector<HTMLElement>(".contacts-ab-list");
+    const calList = root.querySelector<HTMLElement>(".calendars-owned-list");
     return {
       windowX: window.scrollX,
       windowY: window.scrollY,
       tableTop: table?.scrollTop ?? null,
-      sidebarTop: sidebar?.scrollTop ?? null,
+      abListTop: abList?.scrollTop ?? null,
+      calListTop: calList?.scrollTop ?? null,
     };
   }
 
@@ -1773,9 +2726,10 @@ export function mountApp(root: HTMLElement): void {
     windowX: number;
     windowY: number;
     tableTop: number | null;
-    sidebarTop: number | null;
+    abListTop: number | null;
+    calListTop: number | null;
   }) {
-    // Double rAF: after layout of the newly injected contact form
+    // Double rAF: after layout of the newly injected form/list
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         window.scrollTo(s.windowX, s.windowY);
@@ -1783,9 +2737,13 @@ export function mountApp(root: HTMLElement): void {
           const table = root.querySelector<HTMLElement>(".contacts-table-wrap");
           if (table) table.scrollTop = s.tableTop;
         }
-        if (s.sidebarTop !== null) {
-          const sidebar = root.querySelector<HTMLElement>(".contacts-sidebar");
-          if (sidebar) sidebar.scrollTop = s.sidebarTop;
+        if (s.abListTop !== null) {
+          const abList = root.querySelector<HTMLElement>(".contacts-ab-list");
+          if (abList) abList.scrollTop = s.abListTop;
+        }
+        if (s.calListTop !== null) {
+          const calList = root.querySelector<HTMLElement>(".calendars-owned-list");
+          if (calList) calList.scrollTop = s.calListTop;
         }
       });
     });
@@ -1800,6 +2758,10 @@ export function mountApp(root: HTMLElement): void {
     }
     bind();
     restoreScroll(scroll);
+    requestAnimationFrame(() => {
+      positionDtPopovers();
+      root.querySelector(".dt-time.is-selected")?.scrollIntoView({ block: "center" });
+    });
   }
 
   function bindColorPair(form: HTMLFormElement) {
@@ -1831,19 +2793,28 @@ export function mountApp(root: HTMLElement): void {
         void onAction(ev);
       });
     });
-    // Keyboard activation for contacts table rows and calendar list rows
-    root.querySelectorAll<HTMLElement>("tr.contact-table-row[data-action], .cal-row[data-action]").forEach((row) => {
-      row.addEventListener("keydown", (ev: KeyboardEvent) => {
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          row.click();
-        }
+    // Keyboard activation for contacts table rows, calendar list rows, month day cells
+    root
+      .querySelectorAll<HTMLElement>(
+        "tr.contact-table-row[data-action], .cal-row[data-action], .month-cell[data-action]",
+      )
+      .forEach((row) => {
+        row.addEventListener("keydown", (ev: KeyboardEvent) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            row.click();
+          }
+        });
       });
-    });
     const delConfirm = root.querySelector<HTMLInputElement>("#delete-cal-confirm");
     const delSubmit = root.querySelector<HTMLButtonElement>("#delete-cal-submit");
     delConfirm?.addEventListener("change", () => {
       if (delSubmit) delSubmit.disabled = !delConfirm.checked || busy;
+    });
+    const delAbConfirm = root.querySelector<HTMLInputElement>("#delete-ab-confirm");
+    const delAbSubmit = root.querySelector<HTMLButtonElement>("#delete-ab-submit");
+    delAbConfirm?.addEventListener("change", () => {
+      if (delAbSubmit) delAbSubmit.disabled = !delAbConfirm.checked || busy;
     });
     // Avatar photo 404 → initials (no inline onerror — CSP script-src 'self')
     root.querySelectorAll<HTMLImageElement>("img.contact-avatar[data-avatar-fallback]").forEach((img) => {
@@ -1880,6 +2851,67 @@ export function mountApp(root: HTMLElement): void {
         void onEditCal(editForm);
       });
     }
+    const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+    eventForm?.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      void onSaveEvent(eventForm);
+    });
+    // Selects use "change" (not only click) for repeat UI
+    root
+      .querySelectorAll<HTMLSelectElement>(
+        'select[data-action="event-repeat-freq"], select[data-action="event-repeat-end"]',
+      )
+      .forEach((sel) => {
+        sel.addEventListener("change", () => {
+          if (!editingEvent) return;
+          const form = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+          if (!form) return;
+          const fd = new FormData(form);
+          const allDayEl = form.querySelector<HTMLInputElement>('input[name="allDay"]');
+          const nextRepeat = readRepeatFromForm(fd);
+          // Default Until to event start / today when switching to "On date"
+          if (nextRepeat.endMode === "until" && !nextRepeat.until) {
+            nextRepeat.until =
+              toDateInputValue(String(fd.get("start") ?? editingEvent.start ?? "")) ||
+              ymd(new Date());
+          }
+          editingEvent = {
+            ...editingEvent,
+            summary: String(fd.get("summary") ?? editingEvent.summary),
+            description: String(fd.get("description") ?? editingEvent.description),
+            location: String(fd.get("location") ?? editingEvent.location),
+            instanceId: Number(fd.get("instanceId")) || editingEvent.instanceId,
+            allDay: allDayEl?.checked ?? editingEvent.allDay,
+            start: String(fd.get("start") ?? editingEvent.start ?? ""),
+            end: String(fd.get("end") ?? editingEvent.end ?? "") || null,
+            repeat: nextRepeat,
+            hasRrule: !!String(fd.get("repeatFreq") ?? "").trim(),
+          };
+          // End control is disabled when series Ends on a date — close its picker
+          if (
+            nextRepeat.freq &&
+            nextRepeat.endMode === "until" &&
+            eventDtPicker?.field === "end"
+          ) {
+            eventDtPicker = null;
+          }
+          render();
+          if (nextRepeat.endMode === "until") {
+            requestAnimationFrame(() => {
+              const until = root.querySelector<HTMLInputElement>('input[name="repeatUntil"]');
+              until?.focus();
+              // Open native picker when the browser supports it
+              try {
+                (
+                  until as HTMLInputElement & { showPicker?: () => void }
+                )?.showPicker?.();
+              } catch {
+                /* ignore — not all browsers allow programmatic open */
+              }
+            });
+          }
+        });
+      });
     const createForm = root.querySelector<HTMLFormElement>('[data-form="create-cal"]');
     if (createForm) {
       bindColorPair(createForm);
@@ -2059,14 +3091,21 @@ export function mountApp(root: HTMLElement): void {
       }
       fields = { status };
     } else if (action === "bulk-task-due") {
-      const input = root.querySelector<HTMLInputElement>("#bulk-task-due");
-      const raw = input?.value?.trim() ?? "";
+      const raw = bulkDueValue.trim();
       if (!raw) {
         setFlash("error", "Choose a due date to apply");
         render();
         return;
       }
-      fields = { due: new Date(raw).toISOString() };
+      const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+        ? new Date(raw + "T00:00:00")
+        : new Date(raw.length === 16 ? raw : raw);
+      if (Number.isNaN(dueDate.getTime())) {
+        setFlash("error", "Invalid due date");
+        render();
+        return;
+      }
+      fields = { due: dueDate.toISOString() };
     } else if (action === "bulk-task-clear-due") {
       fields = { due: null };
     } else if (action === "bulk-task-percent") {
@@ -2322,6 +3361,135 @@ export function mountApp(root: HTMLElement): void {
     }
   }
 
+  function syncEditingEventFromForm(form: HTMLFormElement): void {
+    if (!editingEvent) return;
+    const fd = new FormData(form);
+    const allDayEl = form.querySelector<HTMLInputElement>('input[name="allDay"]');
+    editingEvent = {
+      ...editingEvent,
+      summary: String(fd.get("summary") ?? editingEvent.summary),
+      description: String(fd.get("description") ?? editingEvent.description),
+      location: String(fd.get("location") ?? editingEvent.location),
+      instanceId: Number(fd.get("instanceId")) || editingEvent.instanceId,
+      allDay: allDayEl?.checked ?? editingEvent.allDay,
+      start: String(fd.get("start") ?? editingEvent.start ?? ""),
+      end: String(fd.get("end") ?? editingEvent.end ?? "") || null,
+      repeat: readRepeatFromForm(fd),
+      hasRrule: !!String(fd.get("repeatFreq") ?? "").trim(),
+    };
+  }
+
+  function readRepeatFromForm(fd: FormData): {
+    freq: string;
+    interval: number;
+    until: string | null;
+    count: number | null;
+    byDay: string[];
+    endMode: "never" | "until" | "count";
+  } {
+    const freq = String(fd.get("repeatFreq") ?? "").trim().toUpperCase();
+    if (!freq) {
+      return { freq: "", interval: 1, until: null, count: null, byDay: [], endMode: "never" };
+    }
+    const interval = Math.max(1, Math.min(99, Number(fd.get("repeatInterval") ?? 1) || 1));
+    const rawEnd = String(fd.get("repeatEndMode") ?? "never");
+    const endMode: "never" | "until" | "count" =
+      rawEnd === "until" || rawEnd === "count" ? rawEnd : "never";
+    let until: string | null = null;
+    let count: number | null = null;
+    if (endMode === "until") {
+      const u = String(fd.get("repeatUntil") ?? "").trim();
+      // Keep endMode=until even if date empty so the date field stays visible
+      until = u ? u.slice(0, 10) : null;
+    } else if (endMode === "count") {
+      const c = Number(fd.get("repeatCount") ?? 0);
+      count = Number.isFinite(c) && c > 0 ? Math.min(999, Math.round(c)) : 10;
+    }
+    const byDay = fd
+      .getAll("repeatByDay")
+      .map((v) => String(v).toUpperCase())
+      .filter(Boolean);
+    return { freq, interval, until, count, byDay, endMode };
+  }
+
+  async function onSaveEvent(form: HTMLFormElement) {
+    if (!editingEvent || !editingEvent.canWrite) return;
+    const fd = new FormData(form);
+    const summary = String(fd.get("summary") ?? "").trim();
+    const description = String(fd.get("description") ?? "").trim();
+    const location = String(fd.get("location") ?? "").trim();
+    const allDay = fd.get("allDay") === "on";
+    const startRaw = String(fd.get("start") ?? "").trim();
+    const endRaw = String(fd.get("end") ?? "").trim();
+    const targetInstanceId = Number(fd.get("instanceId")) || editingEvent.instanceId;
+    const repeat = readRepeatFromForm(fd);
+    if (!summary) {
+      setFlash("error", "Title is required");
+      render();
+      return;
+    }
+    if (!startRaw) {
+      setFlash("error", "Start is required");
+      render();
+      return;
+    }
+    let start: string;
+    let end: string | null;
+    if (allDay) {
+      start = startRaw.slice(0, 10);
+      // Inclusive last day for multi-day all-day events
+      end = endRaw ? endRaw.slice(0, 10) : start;
+    } else {
+      // datetime-local → ISO; date-only fallback keeps multi-day span
+      if (/^\d{4}-\d{2}-\d{2}$/.test(startRaw)) {
+        const conv = convertAllDaySpanToTimed(startRaw, endRaw || null);
+        start = new Date(conv.start).toISOString();
+        end = conv.end ? new Date(conv.end).toISOString() : null;
+      } else {
+        start = new Date(startRaw).toISOString();
+        end = endRaw ? new Date(endRaw).toISOString() : null;
+      }
+    }
+    const sourceId = editingEvent.instanceId;
+    const uri = editingEvent.uri;
+    const isCreate = creatingEvent;
+    busy = true;
+    clearFlash();
+    eventModalOpen = true;
+    render();
+    try {
+      const body = {
+        summary,
+        description,
+        location,
+        allDay,
+        start,
+        end,
+        instanceId: targetInstanceId,
+        repeat,
+      };
+      const res = isCreate
+        ? await api.createEvent(targetInstanceId, body)
+        : await api.updateEvent(sourceId, uri, body);
+      if (selectedId === null || res.event.instanceId !== selectedId) {
+        selectedId = res.event.instanceId;
+      }
+      await loadMonthEvents();
+      // Close modal after successful create/save; flash shows on main page
+      eventModalOpen = false;
+      editingEvent = null;
+      creatingEvent = false;
+      eventDtPicker = null;
+      setFlash("success", isCreate ? "Event created" : "Event saved");
+    } catch (e) {
+      // Keep modal open so the user can fix errors
+      setFlash("error", e instanceof Error ? e.message : "Save failed");
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
   async function onEditCal(form: HTMLFormElement) {
     if (selectedId === null) return;
     const fd = new FormData(form);
@@ -2360,6 +3528,7 @@ export function mountApp(root: HTMLElement): void {
     const holidayCountry = String(fd.get("holidayCountry") ?? "").trim();
     const readOnly = fd.get("readOnly") === "on";
 
+    createCalModalOpen = true;
     if (holidays && !holidayCountry) {
       setFlash("error", "Select a country for the holidays calendar");
       render();
@@ -2385,6 +3554,7 @@ export function mountApp(root: HTMLElement): void {
         readOnly,
       });
       selectedId = res.calendar.id;
+      createCalModalOpen = false;
       await loadHome();
       let msg = `Created “${res.calendar.displayname}”`;
       const hi = res.holidayImport ?? res.calendar.holidayImport;
@@ -2400,6 +3570,7 @@ export function mountApp(root: HTMLElement): void {
       }
       setFlash("success", msg);
     } catch (e) {
+      createCalModalOpen = true;
       setFlash("error", e instanceof Error ? e.message : "Create failed");
     } finally {
       busy = false;
@@ -2428,6 +3599,9 @@ export function mountApp(root: HTMLElement): void {
       selectedContactUri = null;
       editingContact = null;
       creatingContact = false;
+      contactModalOpen = false;
+      abModalOpen = false;
+      createCalModalOpen = false;
       clearFlash();
       busy = false;
       render();
@@ -2476,6 +3650,20 @@ export function mountApp(root: HTMLElement): void {
     }
     if (action === "close-cal-modal") {
       calModalOpen = false;
+      render();
+      return;
+    }
+    if (action === "open-create-cal-modal") {
+      createCalModalOpen = true;
+      calModalOpen = false;
+      deleteConfirmId = null;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "close-create-cal-modal") {
+      createCalModalOpen = false;
+      clearFlash();
       render();
       return;
     }
@@ -2529,6 +3717,7 @@ export function mountApp(root: HTMLElement): void {
     if (action === "month-today") {
       const n = new Date();
       monthCursor = { y: n.getFullYear(), m: n.getMonth() };
+      monthExpandDay = null;
       busy = true;
       render();
       try {
@@ -2543,10 +3732,300 @@ export function mountApp(root: HTMLElement): void {
       const delta = action === "month-prev" ? -1 : 1;
       const d = new Date(monthCursor.y, monthCursor.m + delta, 1);
       monthCursor = { y: d.getFullYear(), m: d.getMonth() };
+      monthExpandDay = null;
       busy = true;
       render();
       try {
         await loadMonthEvents();
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "open-event") {
+      ev.stopPropagation();
+      const instanceId = Number(t.dataset.instance);
+      const uri = t.dataset.uri ?? "";
+      if (!Number.isFinite(instanceId) || !uri) return;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        const res = await api.getEvent(instanceId, uri);
+        editingEvent = {
+          ...res.event,
+          repeat: res.event.repeat ?? defaultRepeat(),
+        };
+        creatingEvent = false;
+        eventModalOpen = true;
+        eventDtPicker = null;
+        calModalOpen = false;
+        deleteConfirmId = null;
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Failed to open event");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "open-event-day") {
+      ev.stopPropagation();
+      const day = t.dataset.day ?? "";
+      monthExpandDay = monthExpandDay === day ? null : day;
+      render();
+      return;
+    }
+    if (action === "new-event-day") {
+      // Ignore if click originated on an event chip / +more (bubbling)
+      const raw = ev.target as HTMLElement | null;
+      if (raw?.closest?.(".month-event, .month-event-more")) return;
+      const day = t.dataset.day ?? "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+      if (selectedId === null) {
+        setFlash("error", "Select a calendar first");
+        render();
+        return;
+      }
+      const cal = calendars.find((c) => c.id === selectedId);
+      if (!cal || cal.readOnly || !(cal.canShare || cal.access === "readwrite")) {
+        setFlash("error", "This calendar is read-only");
+        render();
+        return;
+      }
+      creatingEvent = true;
+      editingEvent = blankEventForDay(day, selectedId);
+      eventModalOpen = true;
+      eventDtPicker = null;
+      calModalOpen = false;
+      deleteConfirmId = null;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "close-event-modal") {
+      eventModalOpen = false;
+      editingEvent = null;
+      creatingEvent = false;
+      eventDtPicker = null;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "dt-open") {
+      const field = t.dataset.dtField || "";
+      if (!field) return;
+      // Sync event form fields if that form is open
+      const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (eventForm && editingEvent) syncEditingEventFromForm(eventForm);
+      if (eventDtPicker?.field === field) {
+        eventDtPicker = null;
+      } else {
+        const dateOnly = t.dataset.dtDateOnly === "1";
+        const allowClear = t.dataset.dtClear !== "0";
+        const name = t.dataset.dtName || field;
+        let raw = getDtFieldCurrentValue(field);
+        if (!raw && (field === "due" || field === "dtstart" || field === "bulk-due")) {
+          raw = defaultTimedRange().start;
+        }
+        const parts = parseDtParts(raw || ymd(new Date()));
+        const [ys, ms] = parts.date.split("-").map(Number);
+        eventDtPicker = {
+          field,
+          viewY: ys,
+          viewM: (ms || 1) - 1,
+          dateOnly,
+          allowClear,
+          name,
+        };
+      }
+      render();
+      return;
+    }
+    if (action === "dt-month-prev" || action === "dt-month-next") {
+      if (!eventDtPicker) return;
+      const delta = action === "dt-month-prev" ? -1 : 1;
+      const d = new Date(eventDtPicker.viewY, eventDtPicker.viewM + delta, 1);
+      eventDtPicker = { ...eventDtPicker, viewY: d.getFullYear(), viewM: d.getMonth() };
+      render();
+      return;
+    }
+    if (action === "dt-pick-day") {
+      if (!eventDtPicker) return;
+      const field = eventDtPicker.field;
+      const day = t.dataset.day ?? "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+      const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (eventForm && editingEvent) syncEditingEventFromForm(eventForm);
+      const dateOnly = eventDtPicker.dateOnly;
+      if (dateOnly) {
+        setDtFieldValue(field, day);
+        eventDtPicker = null;
+      } else {
+        const cur = getDtFieldCurrentValue(field);
+        const hm = parseDtParts(cur || defaultTimedRange(day).start).hm;
+        setDtFieldValue(field, `${day}T${hm}`);
+        // Keep open so user can pick time; update month view
+        eventDtPicker = {
+          ...eventDtPicker,
+          viewY: Number(day.slice(0, 4)),
+          viewM: Number(day.slice(5, 7)) - 1,
+        };
+      }
+      // Event start/end: bump end if needed when changing start day
+      if (field === "start" && editingEvent && !dateOnly && editingEvent.end) {
+        const s = new Date(String(editingEvent.start));
+        const e = new Date(String(editingEvent.end));
+        if (!Number.isNaN(s.getTime()) && !Number.isNaN(e.getTime()) && e <= s) {
+          setDtFieldValue("end", formatLocalDtValue(new Date(s.getTime() + 60 * 60 * 1000)));
+        }
+      }
+      render();
+      return;
+    }
+    if (action === "dt-pick-time") {
+      if (!eventDtPicker || eventDtPicker.dateOnly) return;
+      const field = eventDtPicker.field;
+      const hm = t.dataset.hm ?? "";
+      if (!/^\d{2}:\d{2}$/.test(hm)) return;
+      const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (eventForm && editingEvent) syncEditingEventFromForm(eventForm);
+      const cur = getDtFieldCurrentValue(field) || defaultTimedRange().start;
+      const day = parseDtParts(cur).date;
+      const next = `${day}T${hm}`;
+      setDtFieldValue(field, next);
+      if (field === "start" && editingEvent) {
+        editingEvent = { ...editingEvent, allDay: false };
+        const endCur = editingEvent.end ? parseDtParts(String(editingEvent.end)) : null;
+        const startD = new Date(next);
+        if (!endCur || new Date(`${endCur.date}T${endCur.hm}`) <= startD) {
+          setDtFieldValue("end", formatLocalDtValue(new Date(startD.getTime() + 60 * 60 * 1000)));
+        }
+      }
+      eventDtPicker = null;
+      render();
+      return;
+    }
+    if (action === "dt-today") {
+      if (!eventDtPicker) return;
+      const field = eventDtPicker.field;
+      const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (eventForm && editingEvent) syncEditingEventFromForm(eventForm);
+      const today = ymd(new Date());
+      if (eventDtPicker.dateOnly) {
+        setDtFieldValue(field, today);
+      } else {
+        const range = defaultTimedRange(today);
+        if (field === "start") {
+          setDtFieldValue("start", range.start);
+          if (editingEvent && !editingEvent.end) setDtFieldValue("end", range.end);
+        } else if (field === "end") {
+          setDtFieldValue("end", range.end);
+        } else {
+          // due / dtstart / bulk-due
+          setDtFieldValue(field, range.start);
+        }
+      }
+      eventDtPicker = null;
+      render();
+      return;
+    }
+    if (action === "dt-clear") {
+      if (!eventDtPicker || !eventDtPicker.allowClear) return;
+      const field = eventDtPicker.field;
+      const eventForm = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (eventForm && editingEvent) syncEditingEventFromForm(eventForm);
+      setDtFieldValue(field, null);
+      eventDtPicker = null;
+      render();
+      return;
+    }
+    if (action === "event-allday-toggle") {
+      if (!editingEvent) return;
+      const form = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      const goingAllDay = (t as HTMLInputElement).checked;
+      if (form) {
+        const fd = new FormData(form);
+        const startRaw = String(fd.get("start") ?? editingEvent.start ?? "");
+        const endRaw = String(fd.get("end") ?? editingEvent.end ?? "") || null;
+        let start = startRaw;
+        let end = endRaw;
+        if (goingAllDay) {
+          const conv = convertTimedSpanToAllDay(startRaw, endRaw);
+          start = conv.start;
+          end = conv.end;
+        } else {
+          const sDate = startRaw.slice(0, 10);
+          const eDate = (endRaw || startRaw).slice(0, 10);
+          const conv = convertAllDaySpanToTimed(sDate, eDate);
+          start = conv.start;
+          end = conv.end;
+        }
+        editingEvent = {
+          ...editingEvent,
+          summary: String(fd.get("summary") ?? editingEvent.summary),
+          description: String(fd.get("description") ?? editingEvent.description),
+          location: String(fd.get("location") ?? editingEvent.location),
+          instanceId: Number(fd.get("instanceId")) || editingEvent.instanceId,
+          allDay: goingAllDay,
+          start,
+          end,
+          repeat: readRepeatFromForm(fd),
+        };
+      } else {
+        editingEvent = { ...editingEvent, allDay: goingAllDay };
+      }
+      eventDtPicker = null;
+      render();
+      return;
+    }
+    if (action === "event-repeat-freq" || action === "event-repeat-end") {
+      if (!editingEvent) return;
+      const form = root.querySelector<HTMLFormElement>('[data-form="edit-event"]');
+      if (!form) return;
+      const fd = new FormData(form);
+      // Keep checkbox state in sync when re-rendering
+      const allDayEl = form.querySelector<HTMLInputElement>('input[name="allDay"]');
+      const nextRepeat = readRepeatFromForm(fd);
+      editingEvent = {
+        ...editingEvent,
+        summary: String(fd.get("summary") ?? editingEvent.summary),
+        description: String(fd.get("description") ?? editingEvent.description),
+        location: String(fd.get("location") ?? editingEvent.location),
+        instanceId: Number(fd.get("instanceId")) || editingEvent.instanceId,
+        allDay: allDayEl?.checked ?? editingEvent.allDay,
+        start: String(fd.get("start") ?? editingEvent.start ?? ""),
+        end: String(fd.get("end") ?? editingEvent.end ?? "") || null,
+        repeat: nextRepeat,
+        hasRrule: !!String(fd.get("repeatFreq") ?? "").trim(),
+      };
+      if (
+        nextRepeat.freq &&
+        nextRepeat.endMode === "until" &&
+        eventDtPicker?.field === "end"
+      ) {
+        eventDtPicker = null;
+      }
+      render();
+      return;
+    }
+    if (action === "delete-event") {
+      if (!editingEvent || !editingEvent.canWrite || creatingEvent) return;
+      if (!confirm("Delete this event? CalDAV clients will sync the removal.")) return;
+      const inst = editingEvent.instanceId;
+      const uri = editingEvent.uri;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        await api.deleteEvent(inst, uri);
+        eventModalOpen = false;
+        editingEvent = null;
+        await loadMonthEvents();
+        setFlash("success", "Event deleted");
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Delete failed");
       } finally {
         busy = false;
         render();
@@ -2574,6 +4053,9 @@ export function mountApp(root: HTMLElement): void {
         if (tab !== "calendars") {
           calModalOpen = false;
           deleteConfirmId = null;
+        }
+        if (tab !== "contacts") {
+          deleteAbConfirmId = null;
         }
         clearFlash();
         busy = true;
@@ -2840,10 +4322,12 @@ export function mountApp(root: HTMLElement): void {
       const id = Number(t.dataset.id);
       if (!Number.isFinite(id)) return;
       selectedAbId = id;
+      abModalOpen = false;
       lastContactImportResult = null;
       selectedContactUri = null;
       editingContact = null;
       creatingContact = false;
+      contactModalOpen = false;
       contactSearch = "";
       // Clear list immediately so we never paint previous AB contacts with the new AB id
       // (that caused /addressbooks/{newId}/contacts/{oldUri}/photo → 404).
@@ -2862,6 +4346,47 @@ export function mountApp(root: HTMLElement): void {
         busy = false;
         render();
       }
+      return;
+    }
+    if (action === "edit-ab") {
+      ev.stopPropagation();
+      const id = Number(t.dataset.id);
+      if (!Number.isFinite(id)) return;
+      const ab = addressBooks.find((a) => a.id === id);
+      if (!ab) return;
+      const switched = selectedAbId !== id;
+      selectedAbId = id;
+      abModalOpen = true;
+      contactModalOpen = false;
+      lastContactImportResult = null;
+      clearFlash();
+      if (switched) {
+        selectedContactUri = null;
+        editingContact = null;
+        creatingContact = false;
+        contactSearch = "";
+        contacts = [];
+        photoPreview = null;
+        photoBase64Pending = null;
+        removePhotoPending = false;
+      }
+      busy = true;
+      render();
+      try {
+        if (switched) {
+          await loadContacts(id);
+        }
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Failed to open address book");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "close-ab-modal") {
+      abModalOpen = false;
+      render();
       return;
     }
     if (action === "select-contact") {
@@ -2884,13 +4409,16 @@ export function mountApp(root: HTMLElement): void {
       render();
       return;
     }
-    if (action === "cancel-contact") {
+    if (action === "cancel-contact" || action === "close-contact-modal") {
       creatingContact = false;
+      contactModalOpen = false;
       editingContact = null;
       selectedContactUri = null;
       photoPreview = null;
       photoBase64Pending = null;
       removePhotoPending = false;
+      eventDtPicker = null;
+      clearFlash();
       render();
       return;
     }
@@ -2964,12 +4492,16 @@ export function mountApp(root: HTMLElement): void {
       if (!confirm("Delete this contact? CardDAV clients will sync the removal.")) return;
       busy = true;
       clearFlash();
+      contactModalOpen = true;
       render();
       try {
         await api.deleteContact(selectedAbId, selectedContactUri);
         selectedContactUri = null;
         editingContact = null;
         creatingContact = false;
+        contactModalOpen = false;
+        eventDtPicker = null;
+        photoPreview = null;
         await loadHome();
         setFlash("success", "Contact deleted");
       } catch (e) {
@@ -2981,22 +4513,50 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
     if (action === "delete-ab") {
-      if (selectedAbId === null) return;
-      const ab = addressBooks.find((a) => a.id === selectedAbId);
-      const force = (ab?.cardCount ?? 0) > 0;
-      const msg = force
-        ? `Delete address book “${ab?.displayname ?? ""}” and all ${ab?.cardCount} contacts? This cannot be undone.`
-        : `Delete empty address book “${ab?.displayname ?? ""}”?`;
-      if (!confirm(msg)) return;
+      ev.stopPropagation();
+      const id = Number(t.dataset.id ?? selectedAbId);
+      if (!Number.isFinite(id)) return;
+      const ab = addressBooks.find((a) => a.id === id);
+      if (!ab) return;
+      deleteAbConfirmId = id;
+      abModalOpen = false;
+      contactModalOpen = false;
+      clearFlash();
+      render();
+      return;
+    }
+    if (action === "cancel-delete-ab") {
+      deleteAbConfirmId = null;
+      render();
+      return;
+    }
+    if (action === "confirm-delete-ab") {
+      const id = Number(t.dataset.id);
+      const cb = root.querySelector<HTMLInputElement>("#delete-ab-confirm");
+      if (!Number.isFinite(id) || !cb?.checked) return;
+      const ab = addressBooks.find((a) => a.id === id);
+      if (!ab) return;
+      const force = (ab.cardCount ?? 0) > 0;
       busy = true;
       clearFlash();
       render();
       try {
-        await api.deleteAddressBook(selectedAbId, force);
-        selectedAbId = null;
-        contacts = [];
-        editingContact = null;
+        await api.deleteAddressBook(id, force);
+        if (selectedAbId === id) {
+          selectedAbId = null;
+          contacts = [];
+          editingContact = null;
+          selectedContactUri = null;
+          creatingContact = false;
+        }
+        deleteAbConfirmId = null;
+        abModalOpen = false;
+        contactModalOpen = false;
         await loadHome();
+        if (selectedAbId === null && addressBooks.length > 0) {
+          selectedAbId = addressBooks[0].id;
+          await loadContacts(selectedAbId);
+        }
         setFlash("success", "Address book deleted");
       } catch (e) {
         setFlash("error", e instanceof Error ? e.message : "Delete failed");
@@ -3008,11 +4568,38 @@ export function mountApp(root: HTMLElement): void {
     }
     if (action === "export-ab") {
       if (selectedAbId === null) return;
+      abModalOpen = true;
       busy = true;
       clearFlash();
       render();
       try {
         const { blob, filename } = await api.exportAddressBook(selectedAbId);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        setFlash("success", `Exported ${filename}`);
+      } catch (e) {
+        setFlash("error", e instanceof Error ? e.message : "Export failed");
+      } finally {
+        busy = false;
+        render();
+      }
+      return;
+    }
+    if (action === "export-contact") {
+      if (selectedAbId === null || !selectedContactUri || creatingContact) return;
+      contactModalOpen = true;
+      busy = true;
+      clearFlash();
+      render();
+      try {
+        const { blob, filename } = await api.exportContact(
+          selectedAbId,
+          selectedContactUri,
+        );
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -3092,6 +4679,7 @@ export function mountApp(root: HTMLElement): void {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    abModalOpen = true;
     busy = true;
     clearFlash();
     lastContactImportResult = null;
@@ -3102,6 +4690,7 @@ export function mountApp(root: HTMLElement): void {
       const detail = formatImportResult(res);
       lastContactImportResult = { ok: true, message: detail };
       await loadHome();
+      await loadContacts(selectedAbId);
       setFlash("success", `Import finished for “${file.name}”: ${detail}.`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Import failed";
@@ -3126,6 +4715,8 @@ export function mountApp(root: HTMLElement): void {
     editingContact.title = String(fd.get("title") ?? "");
     editingContact.url = String(fd.get("url") ?? "");
     editingContact.note = String(fd.get("note") ?? "");
+    const bday = String(fd.get("birthday") ?? "").trim();
+    editingContact.birthday = bday && /^\d{4}-\d{2}-\d{2}/.test(bday) ? bday.slice(0, 10) : null;
     editingContact.address = {
       street: String(fd.get("street") ?? ""),
       city: String(fd.get("city") ?? ""),
@@ -3210,6 +4801,10 @@ export function mountApp(root: HTMLElement): void {
       },
       url: String(fd.get("url") ?? "").trim(),
       note: String(fd.get("note") ?? "").trim(),
+      birthday: (() => {
+        const v = String(fd.get("birthday") ?? "").trim();
+        return v && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null;
+      })(),
       custom,
     };
     if (removePhotoPending) {
@@ -3225,32 +4820,29 @@ export function mountApp(root: HTMLElement): void {
     const body = contactBodyFromForm(form);
     busy = true;
     clearFlash();
+    contactModalOpen = true;
     render();
     try {
       if (creatingContact) {
         const res = await api.createContact(selectedAbId, body);
         creatingContact = false;
         selectedContactUri = res.contact.uri;
-        editingContact = res.contact;
-        photoPreview =
-          res.contact.photoDataUri ??
-          (res.contact.hasPhoto
-            ? `${api.contactPhotoUrl(selectedAbId, res.contact.uri)}?t=${Date.now()}`
-            : null);
+        editingContact = null;
+        contactModalOpen = false;
+        photoPreview = null;
         photoBase64Pending = null;
         removePhotoPending = false;
+        eventDtPicker = null;
         setFlash("success", "Contact created");
       } else if (selectedContactUri) {
         const res = await api.updateContact(selectedAbId, selectedContactUri, body);
         selectedContactUri = res.contact.uri;
-        editingContact = res.contact;
-        photoPreview =
-          res.contact.photoDataUri ??
-          (res.contact.hasPhoto
-            ? `${api.contactPhotoUrl(selectedAbId, res.contact.uri)}?t=${Date.now()}`
-            : null);
+        editingContact = null;
+        contactModalOpen = false;
+        photoPreview = null;
         photoBase64Pending = null;
         removePhotoPending = false;
+        eventDtPicker = null;
         setFlash("success", "Contact saved");
       }
       // Reload list; keep selection if list fails
@@ -3304,6 +4896,7 @@ export function mountApp(root: HTMLElement): void {
     const fd = new FormData(form);
     const displayname = String(fd.get("displayname") ?? "").trim();
     const description = String(fd.get("description") ?? "").trim();
+    abModalOpen = true;
     busy = true;
     clearFlash();
     render();

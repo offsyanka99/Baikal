@@ -1,6 +1,6 @@
 # Deployment guide (fork)
 
-**Version:** `0.11.1-fork.3` (based on upstream Baikal 0.11.1)
+**Version:** `0.11.1-fork.4` (based on upstream Baikal 0.11.1)
 
 This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, health endpoints, a dual-format CalDAV calendar-timezone fix for Home Assistant, and a **user portal** for calendars and contacts.
 
@@ -8,7 +8,7 @@ This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SC
 
 | Image | When |
 |-------|------|
-| `ghcr.io/offsyanka99/baikal:0.11.1-fork.3` | **Pin for production** (this release) |
+| `ghcr.io/offsyanka99/baikal:0.11.1-fork.4` | **Pin for production** (this release) |
 | `ghcr.io/offsyanka99/baikal:latest` | Default tracking `master` (GitHub Actions) |
 | `ghcr.io/offsyanka99/baikal:sha-…` | Pin to a git SHA |
 | Build from `Dockerfile` | Dev / offline packaging |
@@ -54,8 +54,8 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 |------|--------|
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
-| 3 | **Calendar:** owned list (Edit / Delete), month grid of events, create holidays/read-only calendars; details, share, and import/export `.ics` in the Edit modal |
-| 4 | **Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf` |
+| 3 | **Calendar:** owned list (Edit / Delete), month grid with create/edit/delete events (RRULE), holidays/read-only; details, share, then import/export `.ics` in the Edit modal |
+| 4 | **Contacts:** address books (delete confirm), contact search/CRUD, photos, birthday/special dates, custom fields, book + single-contact `.vcf` export |
 | 5 | **Tasks / Notes:** CalDAV `VTODO` / `VJOURNAL` on writable calendars (bulk actions on tasks) |
 
 ### Screenshots
@@ -64,7 +64,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 
 ![User portal — Calendar](images/portal-my-calendars.jpg)
 
-**Calendar details** — edit name/color/description, import/export `.ics`, share with other users (modal):
+**Calendar details** — edit name/color/description, share with other users, then import/export `.ics` (modal):
 
 ![User portal — Calendar details](images/portal-calendar-edit.jpg)
 
@@ -88,6 +88,9 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 - **Read-only calendars** are enforced on CalDAV (`/dav.php/`, `/cal.php/`) via `ReadOnlyPlugin` — clients get **403** on write methods, not only a portal import block.
 - Contact photos require **PHP GD** (`php8.2-gd` in the Docker image); stored as **vCard 3.0** `PHOTO;ENCODING=b` JPEG (avoids vCard 4 raw-binary corruption).
 - Portal sessions: idle timeout from `session_max_age_minutes` (same as admin, default 15); login rate-limited; CSRF + same-origin checks on mutations.
+- Optional portal locale helpers in `baikal.yaml` / env (override browser auto-detect):
+  - `system.portal_time_format` or `TIME_FORMAT` / `BAIKAL_PORTAL_TIME_FORMAT`: `auto` | `12h` | `24h`
+  - `system.portal_week_start` or `BAIKAL_PORTAL_WEEK_START`: `auto` | `monday` | `sunday`
 
 ### API (summary)
 
@@ -99,6 +102,9 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 | PATCH | `/api/calendars/{id}` | Update name / color / description |
 | GET | `/api/calendars/{id}/export` | Download `.ics` |
 | POST | `/api/calendars/{id}/import` | Import `.ics` body `{ics}` |
+| GET | `/api/calendars/{id}/events` | List events (`?from=&to=`) |
+| POST | `/api/calendars/{id}/events` | Create VEVENT |
+| GET/PATCH/DELETE | `/api/calendars/{id}/events/{uri}` | Get / update / delete VEVENT |
 | POST/DELETE | `/api/calendars/{id}/shares` | Share / revoke |
 | GET | `/api/addressbooks` | List address books |
 | POST | `/api/addressbooks` | Create address book |
@@ -109,6 +115,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 | GET | `/api/addressbooks/{id}/contacts` | List/search contacts (`?q=`) |
 | POST | `/api/addressbooks/{id}/contacts` | Create contact |
 | GET/PATCH/DELETE | `/api/addressbooks/{id}/contacts/{uri}` | Get / update / delete contact |
+| GET | `/api/addressbooks/{id}/contacts/{uri}/export` | Download single contact `.vcf` |
 | GET | `/api/addressbooks/{id}/contacts/{uri}/photo` | Contact photo JPEG |
 | GET | `/api/holidays/countries` | Country list for holidays calendars |
 
@@ -212,9 +219,16 @@ if a new sabre/dav release changes those files.
 ## Upstream
 
 Core CalDAV/CardDAV remains based on [sabre-io/Baikal](https://github.com/sabre-io/Baikal) **0.11.1**.  
-Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.3`). Prefer rebasing packaging onto upstream releases regularly.
+Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasing packaging onto upstream releases regularly.
 
 ## Release notes
+
+### 0.11.1-fork.4
+
+- Portal calendar **event CRUD** (create/edit/delete VEVENT from month view) with **RRULE** support
+- Single-contact `.vcf` export; address-book delete confirmation modal; contact birthday / special date
+- Tasks bulk-bar UX (green apply icons; Delete / Clear selection on second row); Calendar details: Share before Import/export
+- Portal time format / week start prefs (`portal_time_format`, `portal_week_start` or env overrides)
 
 ### 0.11.1-fork.3
 
