@@ -56,6 +56,16 @@ Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
 | 3 | **My Calendars:** add/edit calendars, holidays, share, import/export `.ics` |
 | 4 | **My Contacts:** select address book, import/export `.vcf` |
 
+### Screenshots
+
+**My Calendars** — owned calendars, holidays / read-only badges, edit details, import/export `.ics`, share:
+
+![User portal — My Calendars](images/portal-my-calendars.jpg)
+
+**My Contacts** — address books, import/export `.vcf`, import result banner:
+
+![User portal — My Contacts](images/portal-my-contacts.png)
+
 - Backend: PHP API under `/api/` (session cookie; sabre CalDAV/CardDAV backends).
 - Frontend source: [`portal/`](../portal/) (Vite + TypeScript); image build compiles into `html/portal/`.
 - Footer **Docs** → [github.com/offsyanka99/Baikal/tree/master/docs](https://github.com/offsyanka99/Baikal/tree/master/docs).

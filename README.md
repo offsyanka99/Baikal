@@ -77,6 +77,11 @@ User portal
 3. **My Calendars:** create/edit calendars, holidays, share, import/export `.ics`.
 4. **My Contacts:** select address book, import/export `.vcf`.
 
+![User portal — My Calendars](docs/images/portal-my-calendars.jpg)
+
+![User portal — My Contacts](docs/images/portal-my-contacts.png)
+
+More detail: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#user-portal).  
 `/dav.php/` remains available as the original sabre browser (and for all CalDAV/CardDAV clients).
 
 Home Assistant
