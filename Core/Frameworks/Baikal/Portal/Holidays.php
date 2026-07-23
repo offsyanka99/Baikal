@@ -57,10 +57,7 @@ class Holidays {
         foreach ([$year, $year + 1] as $y) {
             $raw = self::httpGet(self::BASE . '/PublicHolidays/' . $y . '/' . rawurlencode($countryCode));
             if ($raw === null) {
-                throw new ApiException(
-                    'Could not fetch holidays for ' . $countryCode . ' (network or API unavailable)',
-                    502
-                );
+                throw new ApiException('Could not fetch holidays for ' . $countryCode . ' (network or API unavailable)', 502);
             }
             $data = json_decode($raw, true);
             if (!is_array($data)) {

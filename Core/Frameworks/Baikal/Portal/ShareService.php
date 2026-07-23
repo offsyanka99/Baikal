@@ -319,10 +319,7 @@ class ShareService {
 
         $calId = $this->requireCalendarAccess($username, $instanceId, true);
         if (!$allowReadOnly && $this->meta->isReadOnly($instanceId)) {
-            throw new ApiException(
-                'This calendar is marked read-only. Import is disabled so events stay unchanged.',
-                403
-            );
+            throw new ApiException('This calendar is marked read-only. Import is disabled so events stay unchanged.', 403);
         }
 
         // Strip UTF-8 BOM (common from Windows / Thunderbird)
