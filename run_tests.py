@@ -95,7 +95,8 @@ def run_file(path):
         browser = mechanicalsoup.StatefulBrowser()
         test_function = getattr(mod, n)
         try:
-            setup_function()
+            if setup_function is not None:
+                setup_function()
             test_function(browser)
             print("[OK]")
         except:
