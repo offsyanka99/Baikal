@@ -3,7 +3,6 @@
 /**
  * Public service info (no secrets). Safe for status pages and companion apps.
  */
-
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');

@@ -16,11 +16,11 @@ use Sabre\CalDAV\Plugin;
 
 $failures = 0;
 
-function assert_true(bool $cond, string $msg): void
-{
+function assert_true(bool $cond, string $msg): void {
     global $failures;
     if ($cond) {
         echo "OK  $msg\n";
+
         return;
     }
     echo "FAIL $msg\n";
