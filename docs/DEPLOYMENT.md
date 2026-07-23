@@ -1,14 +1,14 @@
 # Deployment guide (fork)
 
-**Version:** `0.11.1-fork.1` (based on upstream Baikal 0.11.1)
+**Version:** `0.11.1-fork.2` (based on upstream Baikal 0.11.1)
 
-This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, health endpoints, a dual-format CalDAV calendar-timezone fix for Home Assistant, and a **user portal** for calendar management and sharing.
+This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, health endpoints, a dual-format CalDAV calendar-timezone fix for Home Assistant, and a **user portal** for calendars and contacts.
 
 ## Images
 
 | Image | When |
 |-------|------|
-| `ghcr.io/offsyanka99/baikal:0.11.1-fork.1` | **Pin for production** (this release) |
+| `ghcr.io/offsyanka99/baikal:0.11.1-fork.2` | **Pin for production** (this release) |
 | `ghcr.io/offsyanka99/baikal:latest` | Default tracking `master` (GitHub Actions) |
 | `ghcr.io/offsyanka99/baikal:sha-…` | Pin to a git SHA |
 | Build from `Dockerfile` | Dev / offline packaging |
@@ -35,7 +35,7 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 
 | Path | Purpose |
 |------|---------|
-| `/portal/` | **User portal** (share calendars; DAV user login) |
+| `/portal/` | **User portal** (calendars + contacts; DAV user login) |
 | `/api/` | Portal JSON API (session cookie; same origin as SPA) |
 | `/health.php` | Liveness JSON (`status`, `version`, install lock) |
 | `/info.php` | Public feature flags (no secrets) |
@@ -46,21 +46,21 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 
 ## User portal
 
-Modern UI (TypeScript SPA, dark theme aligned with bookmarks-sync admin style) for **end users**:
+Modern UI (TypeScript SPA, dark theme aligned with bookmarks-sync admin style) for **end users**.  
+Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
 
 | Step | Action |
 |------|--------|
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
-| 3 | **Add calendar** or select one you own |
-| 4 | Edit **display name**, **color**, **description** → Save |
-| 5 | Share with another Baikal user → **Read only** or **Full access** |
-| 6 | Revoke from the share list when needed |
+| 3 | **My Calendars:** add/edit calendars, holidays, share, import/export `.ics` |
+| 4 | **My Contacts:** select address book, import/export `.vcf` |
 
-- Backend: PHP API under `/api/` (session cookie; sabre calendar + sharing backends).
+- Backend: PHP API under `/api/` (session cookie; sabre CalDAV/CardDAV backends).
 - Frontend source: [`portal/`](../portal/) (Vite + TypeScript); image build compiles into `html/portal/`.
 - Footer **Docs** → [github.com/offsyanka99/Baikal/tree/master/docs](https://github.com/offsyanka99/Baikal/tree/master/docs).
 - **`/dav.php/` is unchanged** — CalDAV/CardDAV for clients and classic browser backup.
+- Portal meta (read-only / holidays flags): `Specific/portal_meta.json` (include in backups).
 
 ### API (summary)
 
@@ -68,9 +68,15 @@ Modern UI (TypeScript SPA, dark theme aligned with bookmarks-sync admin style) f
 |--------|------|---------|
 | POST | `/api/login` | DAV user session |
 | GET | `/api/calendars` | List calendars |
-| POST | `/api/calendars` | Create (`displayname`, `color?`, `description?`) |
+| POST | `/api/calendars` | Create (`displayname`, `color?`, `description?`, `holidays?`, `holidayCountry?`, `readOnly?`) |
 | PATCH | `/api/calendars/{id}` | Update name / color / description |
+| GET | `/api/calendars/{id}/export` | Download `.ics` |
+| POST | `/api/calendars/{id}/import` | Import `.ics` body `{ics}` |
 | POST/DELETE | `/api/calendars/{id}/shares` | Share / revoke |
+| GET | `/api/addressbooks` | List address books |
+| GET | `/api/addressbooks/{id}/export` | Download `.vcf` |
+| POST | `/api/addressbooks/{id}/import` | Import `.vcf` body `{vcf}` |
+| GET | `/api/holidays/countries` | Country list for holidays calendars |
 
 See [`portal/README.md`](../portal/README.md).
 
@@ -172,9 +178,18 @@ if a new sabre/dav release changes those files.
 ## Upstream
 
 Core CalDAV/CardDAV remains based on [sabre-io/Baikal](https://github.com/sabre-io/Baikal) **0.11.1**.  
-Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.1`). Prefer rebasing packaging onto upstream releases regularly.
+Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.2`). Prefer rebasing packaging onto upstream releases regularly.
 
-## Release notes (0.11.1-fork.1)
+## Release notes
+
+### 0.11.1-fork.2
+
+- Portal tabs: My Calendars / My Contacts
+- Calendar import/export (`.ics`), holidays calendars, read-only flag
+- Contacts import/export (`.vcf`)
+- Info (i) modals; import result UI; large-import timeout handling
+
+### 0.11.1-fork.1
 
 - User portal: create/edit calendars (name, color, description), share/revoke
 - HA-friendly dual-format calendar-timezone (no `APPLY_HOME_ASSISTANT_FIX`)

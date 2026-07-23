@@ -7,6 +7,8 @@ use Sabre\DAV\PropPatch;
 use Sabre\DAV\Sharing\Plugin as SharingPlugin;
 use Sabre\DAV\UUIDUtil;
 use Sabre\DAV\Xml\Element\Sharee;
+use Sabre\VObject\Component\VCalendar;
+use Sabre\VObject\Reader;
 
 /**
  * Calendar listing and sharing via sabre/dav CalDAV backend.
@@ -18,9 +20,13 @@ class ShareService {
     /** @var CaldavBackend */
     private $backend;
 
-    public function __construct(\PDO $pdo) {
+    /** @var PortalMeta */
+    private $meta;
+
+    public function __construct(\PDO $pdo, ?PortalMeta $meta = null) {
         $this->pdo = $pdo;
         $this->backend = new CaldavBackend($pdo);
+        $this->meta = $meta ?? new PortalMeta();
     }
 
     /**
@@ -39,19 +45,23 @@ class ShareService {
             $access = (int) ($cal['share-access'] ?? SharingPlugin::ACCESS_NOTSHARED);
             $isOwner = $access === SharingPlugin::ACCESS_SHAREDOWNER
                 || $access === SharingPlugin::ACCESS_NOTSHARED;
+            $instanceId = (int) $id[1];
+            $flags = $this->meta->get($instanceId);
 
             $out[] = [
-                'id'          => (int) $id[1], // instance id (unique per principal view)
-                'calendarId'  => (int) $id[0],
-                'instanceId'  => (int) $id[1],
-                'uri'         => (string) ($cal['uri'] ?? ''),
-                'displayname' => (string) ($cal['{DAV:}displayname'] ?? $cal['uri'] ?? 'Calendar'),
-                'description' => (string) ($cal['{urn:ietf:params:xml:ns:caldav}calendar-description'] ?? ''),
-                'color'       => (string) ($cal['{http://apple.com/ns/ical/}calendar-color'] ?? ''),
-                'access'      => $this->accessLabel($access),
-                'accessCode'  => $access,
-                'canShare'    => $isOwner,
-                'components'  => (string) ($cal['components'] ?? ''),
+                'id'               => $instanceId, // instance id (unique per principal view)
+                'calendarId'       => (int) $id[0],
+                'instanceId'       => $instanceId,
+                'uri'              => (string) ($cal['uri'] ?? ''),
+                'displayname'      => (string) ($cal['{DAV:}displayname'] ?? $cal['uri'] ?? 'Calendar'),
+                'description'      => (string) ($cal['{urn:ietf:params:xml:ns:caldav}calendar-description'] ?? ''),
+                'color'            => (string) ($cal['{http://apple.com/ns/ical/}calendar-color'] ?? ''),
+                'access'           => $this->accessLabel($access),
+                'accessCode'       => $access,
+                'canShare'         => $isOwner,
+                'components'       => (string) ($cal['components'] ?? ''),
+                'readOnly'         => $flags['readOnly'],
+                'holidaysCountry'  => $flags['holidaysCountry'],
             ];
         }
 
@@ -65,17 +75,43 @@ class ShareService {
     /**
      * Create a calendar owned by the user.
      *
-     * @param array{displayname?: string, description?: string, color?: string} $fields
+     * @param array{
+     *   displayname?: string,
+     *   description?: string,
+     *   color?: string,
+     *   readOnly?: bool,
+     *   holidays?: bool,
+     *   holidayCountry?: string
+     * } $fields
      *
      * @return array<string, mixed>
      */
     public function createCalendar(string $username, array $fields): array {
+        $holidays = !empty($fields['holidays']);
+        $holidayCountry = strtoupper(trim((string) ($fields['holidayCountry'] ?? '')));
+        $readOnly = !empty($fields['readOnly']);
+
+        if ($holidays) {
+            if ($holidayCountry === '' || !preg_match('/^[A-Z]{2}$/', $holidayCountry)) {
+                throw new ApiException('Select a country for the holidays calendar', 400);
+            }
+            if (!Holidays::isValidCountryCode($holidayCountry)) {
+                throw new ApiException('Unknown country code: ' . $holidayCountry, 400);
+            }
+        }
+
         $displayname = trim((string) ($fields['displayname'] ?? ''));
+        if ($displayname === '' && $holidays) {
+            $displayname = 'Holidays (' . $holidayCountry . ')';
+        }
         if ($displayname === '') {
             throw new ApiException('Display name is required', 400);
         }
         $description = trim((string) ($fields['description'] ?? ''));
-        $color = $this->normalizeColor(isset($fields['color']) ? (string) $fields['color'] : '');
+        if ($holidays && $description === '') {
+            $description = 'Public holidays for ' . $holidayCountry . ' (this year and next).';
+        }
+        $color = $this->normalizeColor(isset($fields['color']) ? (string) $fields['color'] : ($holidays ? '#DC2626' : ''));
 
         $uri = $this->uniqueCalendarUri($username, $displayname);
         $properties = [
@@ -89,24 +125,43 @@ class ShareService {
         $ids = $this->backend->createCalendar('principals/' . $username, $uri, $properties);
         $instanceId = is_array($ids) ? (int) $ids[1] : 0;
 
+        $this->meta->set($instanceId, [
+            'readOnly'        => $readOnly,
+            'holidaysCountry' => $holidays ? $holidayCountry : null,
+        ]);
+
+        $holidayImport = null;
+        if ($holidays) {
+            $ics = Holidays::buildIcs($holidayCountry, $displayname);
+            // Bypass read-only for the initial seed import
+            $holidayImport = $this->importCalendar($username, $instanceId, $ics, true);
+        }
+
         foreach ($this->listCalendars($username) as $cal) {
             if ((int) $cal['id'] === $instanceId) {
+                if ($holidayImport !== null) {
+                    $cal['holidayImport'] = $holidayImport;
+                }
+
                 return $cal;
             }
         }
 
         return [
-            'id'          => $instanceId,
-            'calendarId'  => is_array($ids) ? (int) $ids[0] : 0,
-            'instanceId'  => $instanceId,
-            'uri'         => $uri,
-            'displayname' => $displayname,
-            'description' => $description,
-            'color'       => $color,
-            'access'      => 'owner',
-            'accessCode'  => SharingPlugin::ACCESS_SHAREDOWNER,
-            'canShare'    => true,
-            'components'  => 'VEVENT,VTODO',
+            'id'              => $instanceId,
+            'calendarId'      => is_array($ids) ? (int) $ids[0] : 0,
+            'instanceId'      => $instanceId,
+            'uri'             => $uri,
+            'displayname'     => $displayname,
+            'description'     => $description,
+            'color'           => $color,
+            'access'          => 'owner',
+            'accessCode'      => SharingPlugin::ACCESS_SHAREDOWNER,
+            'canShare'        => true,
+            'components'      => 'VEVENT,VTODO',
+            'readOnly'        => $readOnly,
+            'holidaysCountry' => $holidays ? $holidayCountry : null,
+            'holidayImport'   => $holidayImport,
         ];
     }
 
@@ -164,6 +219,266 @@ class ShareService {
     }
 
     /**
+     * Export all objects in a calendar as a single .ics file.
+     *
+     * @return array{ics: string, filename: string, count: int}
+     */
+    public function exportCalendar(string $username, int $instanceId): array {
+        $calId = $this->requireCalendarAccess($username, $instanceId, false);
+        $meta = $this->getCalendarMeta($username, $instanceId);
+
+        $objects = $this->backend->getCalendarObjects($calId);
+        $uris = [];
+        foreach ($objects as $obj) {
+            if (!empty($obj['uri'])) {
+                $uris[] = (string) $obj['uri'];
+            }
+        }
+
+        $blobs = [];
+        if ($uris !== []) {
+            foreach ($this->backend->getMultipleCalendarObjects($calId, $uris) as $row) {
+                if (!empty($row['calendardata'])) {
+                    $blobs[(string) $row['uri']] = $row['calendardata'];
+                }
+            }
+        }
+
+        $calendar = new VCalendar();
+        $calendar->VERSION = '2.0';
+        $calendar->PRODID = '-//Baikal Portal//EN';
+        $calendar->{'X-WR-CALNAME'} = $meta['displayname'];
+        if ($meta['color'] !== '') {
+            $calendar->{'X-APPLE-CALENDAR-COLOR'} = $meta['color'];
+        }
+
+        $collectedTimezones = [];
+        $timezones = [];
+        $components = [];
+        $count = 0;
+
+        foreach ($blobs as $inputObject) {
+            try {
+                $nodeComp = Reader::read($inputObject);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            foreach ($nodeComp->children() as $child) {
+                switch ($child->name) {
+                    case 'VEVENT':
+                    case 'VTODO':
+                    case 'VJOURNAL':
+                        $components[] = clone $child;
+                        ++$count;
+                        break;
+                    case 'VTIMEZONE':
+                        $tzid = (string) $child->TZID;
+                        if ($tzid !== '' && !in_array($tzid, $collectedTimezones, true)) {
+                            $timezones[] = clone $child;
+                            $collectedTimezones[] = $tzid;
+                        }
+                        break;
+                }
+            }
+            $nodeComp->destroy();
+        }
+
+        foreach ($timezones as $tz) {
+            $calendar->add($tz);
+        }
+        foreach ($components as $comp) {
+            $calendar->add($comp);
+        }
+
+        $safeName = preg_replace('/[^a-zA-Z0-9-_ ]/u', '', $meta['displayname']) ?: 'calendar';
+        $safeName = trim(preg_replace('/\s+/', '-', $safeName) ?? 'calendar', '-');
+        $filename = $safeName . '-' . date('Y-m-d') . '.ics';
+
+        return [
+            'ics'      => $calendar->serialize(),
+            'filename' => $filename,
+            'count'    => $count,
+        ];
+    }
+
+    /**
+     * Import events/tasks/notes from an .ics payload into a writable calendar.
+     *
+     * Optimized for large Thunderbird exports (thousands of components):
+     * longer PHP time limit, one-shot existing-URI lookup, lean VTIMEZONE attach.
+     *
+     * @return array{imported: int, updated: int, skipped: int}
+     */
+    public function importCalendar(string $username, int $instanceId, string $icsData, bool $allowReadOnly = false): array {
+        // Large .ics files (Thunderbird full export) exceed the default 30s easily.
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+        @ini_set('max_execution_time', '300');
+        @ini_set('memory_limit', '256M');
+
+        $calId = $this->requireCalendarAccess($username, $instanceId, true);
+        if (!$allowReadOnly && $this->meta->isReadOnly($instanceId)) {
+            throw new ApiException(
+                'This calendar is marked read-only. Import is disabled so events stay unchanged.',
+                403
+            );
+        }
+
+        // Strip UTF-8 BOM (common from Windows / Thunderbird)
+        if (strncmp($icsData, "\xEF\xBB\xBF", 3) === 0) {
+            $icsData = substr($icsData, 3);
+        }
+        $icsData = trim($icsData);
+        if ($icsData === '') {
+            throw new ApiException('ICS data is empty', 400);
+        }
+        if (strlen($icsData) > 20 * 1024 * 1024) {
+            throw new ApiException('ICS file is too large (max 20 MB)', 400);
+        }
+
+        try {
+            $parsed = Reader::read($icsData, Reader::OPTION_FORGIVING);
+        } catch (\Throwable $e) {
+            throw new ApiException('Invalid ICS data: ' . $e->getMessage(), 400);
+        }
+
+        if ($parsed->name !== 'VCALENDAR') {
+            // Single component without envelope — wrap
+            if (in_array($parsed->name, ['VEVENT', 'VTODO', 'VJOURNAL'], true)) {
+                $wrap = new VCalendar();
+                $wrap->VERSION = '2.0';
+                $wrap->add(clone $parsed);
+                $parsed->destroy();
+                $parsed = $wrap;
+            } else {
+                $name = $parsed->name;
+                $parsed->destroy();
+                throw new ApiException('ICS must be a VCALENDAR (got ' . $name . ')', 400);
+            }
+        }
+
+        /** @var array<string, \Sabre\VObject\Component> $timezonesById */
+        $timezonesById = [];
+        $toImport = [];
+        foreach ($parsed->getComponents() as $comp) {
+            if ($comp->name === 'VTIMEZONE') {
+                $tzid = isset($comp->TZID) ? (string) $comp->TZID : '';
+                if ($tzid !== '' && !isset($timezonesById[$tzid])) {
+                    $timezonesById[$tzid] = clone $comp;
+                }
+            } elseif (in_array($comp->name, ['VEVENT', 'VTODO', 'VJOURNAL'], true)) {
+                $toImport[] = clone $comp;
+            }
+        }
+        $parsed->destroy();
+
+        if ($toImport === []) {
+            throw new ApiException('No VEVENT, VTODO, or VJOURNAL components found in ICS', 400);
+        }
+
+        // Preload existing object URIs for this calendar (one query vs N)
+        $existingUris = $this->listExistingObjectUris($calId);
+
+        $imported = 0;
+        $updated = 0;
+        $skipped = 0;
+        $n = 0;
+
+        foreach ($toImport as $comp) {
+            ++$n;
+            // Keep the request alive on very large files
+            if (($n % 50) === 0 && function_exists('set_time_limit')) {
+                @set_time_limit(300);
+            }
+
+            $uid = isset($comp->UID) ? (string) $comp->UID : '';
+            if ($uid === '') {
+                $uid = UUIDUtil::getUUID();
+                $comp->UID = $uid;
+            }
+
+            $uri = $this->objectUriFromUid($uid);
+
+            try {
+                $object = new VCalendar();
+                $object->VERSION = '2.0';
+                $object->PRODID = '-//Baikal Portal//EN';
+                foreach ($this->referencedTimezoneIds($comp) as $tzid) {
+                    if (isset($timezonesById[$tzid])) {
+                        $object->add(clone $timezonesById[$tzid]);
+                    }
+                }
+                $object->add($comp);
+                $serialized = $object->serialize();
+                $object->destroy();
+
+                if (isset($existingUris[$uri])) {
+                    $this->backend->updateCalendarObject($calId, $uri, $serialized);
+                    ++$updated;
+                } else {
+                    $this->backend->createCalendarObject($calId, $uri, $serialized);
+                    $existingUris[$uri] = true;
+                    ++$imported;
+                }
+            } catch (\Throwable $e) {
+                error_log('portal import object ' . $uri . ': ' . $e->getMessage());
+                ++$skipped;
+            }
+        }
+
+        foreach ($timezonesById as $tz) {
+            $tz->destroy();
+        }
+
+        return [
+            'imported' => $imported,
+            'updated'  => $updated,
+            'skipped'  => $skipped,
+        ];
+    }
+
+    /**
+     * @param array{0: int, 1: int} $calId
+     *
+     * @return array<string, true> map of existing object URIs
+     */
+    private function listExistingObjectUris(array $calId): array {
+        list($calendarId) = $calId;
+        $stmt = $this->pdo->prepare(
+            'SELECT uri FROM calendarobjects WHERE calendarid = ?'
+        );
+        $stmt->execute([(int) $calendarId]);
+        $map = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            if (!empty($row['uri'])) {
+                $map[(string) $row['uri']] = true;
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * Collect TZID parameter values referenced by a component.
+     *
+     * @return list<string>
+     */
+    private function referencedTimezoneIds($comp): array {
+        $ids = [];
+        foreach ($comp->children() as $child) {
+            if (!$child instanceof \Sabre\VObject\Property) {
+                continue;
+            }
+            if (isset($child['TZID'])) {
+                $ids[(string) $child['TZID']] = true;
+            }
+        }
+
+        return array_keys($ids);
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     public function listShares(string $username, int $instanceId): array {
@@ -203,6 +518,10 @@ class ShareService {
         }
 
         $accessCode = $this->parseAccess($access);
+        // Portal "read-only for everyone" forces sharees to read-only access
+        if ($this->meta->isReadOnly($instanceId)) {
+            $accessCode = SharingPlugin::ACCESS_READ;
+        }
         $target = $this->resolveUser($shareUsername);
         $calId = $this->requireOwnedCalendarId($ownerUsername, $instanceId);
 
@@ -282,9 +601,43 @@ class ShareService {
      * @return array{0: int, 1: int}
      */
     private function requireOwnedCalendarId(string $username, int $instanceId): array {
+        $row = $this->loadInstance($username, $instanceId);
+        $access = (int) $row['access'];
+        if ($access !== SharingPlugin::ACCESS_SHAREDOWNER && $access !== SharingPlugin::ACCESS_NOTSHARED) {
+            throw new ApiException('Only the calendar owner can manage shares', 403);
+        }
+
+        return [(int) $row['calendarid'], (int) $row['id']];
+    }
+
+    /**
+     * @return array{0: int, 1: int} [calendarId, instanceId]
+     */
+    private function requireCalendarAccess(string $username, int $instanceId, bool $write): array {
+        $row = $this->loadInstance($username, $instanceId);
+        $access = (int) $row['access'];
+        $isOwner = $access === SharingPlugin::ACCESS_SHAREDOWNER
+            || $access === SharingPlugin::ACCESS_NOTSHARED;
+        $canWrite = $isOwner || $access === SharingPlugin::ACCESS_READWRITE;
+        $canRead = $canWrite || $access === SharingPlugin::ACCESS_READ;
+
+        if ($write && !$canWrite) {
+            throw new ApiException('You do not have write access to this calendar', 403);
+        }
+        if (!$write && !$canRead) {
+            throw new ApiException('You do not have access to this calendar', 403);
+        }
+
+        return [(int) $row['calendarid'], (int) $row['id']];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function loadInstance(string $username, int $instanceId): array {
         $principal = 'principals/' . $username;
         $stmt = $this->pdo->prepare(
-            'SELECT id, calendarid, access, principaluri
+            'SELECT id, calendarid, access, principaluri, displayname, description, calendarcolor, uri
              FROM calendarinstances
              WHERE id = ? AND principaluri = ?'
         );
@@ -293,12 +646,34 @@ class ShareService {
         if (!$row) {
             throw new ApiException('Calendar not found', 404);
         }
-        $access = (int) $row['access'];
-        if ($access !== SharingPlugin::ACCESS_SHAREDOWNER && $access !== SharingPlugin::ACCESS_NOTSHARED) {
-            throw new ApiException('Only the calendar owner can manage shares', 403);
+
+        return $row;
+    }
+
+    /**
+     * @return array{displayname: string, color: string, uri: string}
+     */
+    private function getCalendarMeta(string $username, int $instanceId): array {
+        $row = $this->loadInstance($username, $instanceId);
+
+        return [
+            'displayname' => (string) ($row['displayname'] ?: $row['uri'] ?: 'Calendar'),
+            'color'       => (string) ($row['calendarcolor'] ?? ''),
+            'uri'         => (string) ($row['uri'] ?? ''),
+        ];
+    }
+
+    private function objectUriFromUid(string $uid): string {
+        $safe = preg_replace('/[^A-Za-z0-9_.@-]+/', '-', $uid) ?? '';
+        $safe = trim($safe, '-.');
+        if ($safe === '') {
+            $safe = UUIDUtil::getUUID();
+        }
+        if (strlen($safe) > 180) {
+            $safe = substr($safe, 0, 180);
         }
 
-        return [(int) $row['calendarid'], (int) $row['id']];
+        return $safe . '.ics';
     }
 
     /**

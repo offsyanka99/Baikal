@@ -17,6 +17,20 @@ export type Calendar = {
   accessCode: number;
   canShare: boolean;
   components: string;
+  readOnly?: boolean;
+  holidaysCountry?: string | null;
+  holidayImport?: { imported: number; updated: number; skipped: number };
+};
+
+export type HolidayCountry = {
+  code: string;
+  name: string;
+};
+
+export type ImportResult = {
+  imported: number;
+  updated: number;
+  skipped: number;
 };
 
 export type Share = {
@@ -33,6 +47,14 @@ export type DirectoryUser = {
   username: string;
   displayname: string;
   email: string;
+};
+
+export type AddressBook = {
+  id: number;
+  uri: string;
+  displayname: string;
+  description: string;
+  cardCount: number;
 };
 
 class ApiError extends Error {
@@ -66,14 +88,19 @@ async function request<T>(
     }
   }
   if (!res.ok) {
-    const msg =
+    let msg = `Request failed (${res.status})`;
+    if (
       data &&
       typeof data === "object" &&
       data !== null &&
       "error" in data &&
       typeof (data as { error: unknown }).error === "string"
-        ? (data as { error: string }).error
-        : `Request failed (${res.status})`;
+    ) {
+      msg = (data as { error: string }).error;
+    } else if (res.status === 500 || res.status === 504) {
+      msg =
+        "Server error during import (often a timeout on large calendars). Try again — already imported events update faster.";
+    }
     throw new ApiError(msg, res.status);
   }
   return data as T;
@@ -95,11 +122,19 @@ export const api = {
     displayname: string;
     description?: string;
     color?: string;
+    readOnly?: boolean;
+    holidays?: boolean;
+    holidayCountry?: string;
   }) =>
-    request<{ calendar: Calendar }>("/calendars", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    request<{ calendar: Calendar; holidayImport?: ImportResult | null }>(
+      "/calendars",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+  holidayCountries: () =>
+    request<{ countries: HolidayCountry[] }>("/holidays/countries"),
   updateCalendar: (
     instanceId: number,
     body: { displayname?: string; description?: string; color?: string },
@@ -107,6 +142,31 @@ export const api = {
     request<{ calendar: Calendar }>(`/calendars/${instanceId}`, {
       method: "PATCH",
       body: JSON.stringify(body),
+    }),
+  exportCalendar: async (instanceId: number): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(`/api/calendars/${instanceId}/export`, {
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      let msg = `Export failed (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data.error) msg = data.error;
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(msg, res.status);
+    }
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/i.exec(cd);
+    const filename = m?.[1] || `calendar-${instanceId}.ics`;
+    const blob = await res.blob();
+    return { blob, filename };
+  },
+  importCalendar: (instanceId: number, ics: string) =>
+    request<ImportResult>(`/calendars/${instanceId}/import`, {
+      method: "POST",
+      body: JSON.stringify({ ics }),
     }),
   directory: () => request<{ users: DirectoryUser[] }>("/directory"),
   shares: (instanceId: number) =>
@@ -120,6 +180,36 @@ export const api = {
     request<{ ok: boolean }>(`/calendars/${instanceId}/shares`, {
       method: "DELETE",
       body: JSON.stringify({ href }),
+    }),
+
+  addressbooks: () =>
+    request<{ addressbooks: AddressBook[] }>("/addressbooks"),
+  exportAddressBook: async (
+    id: number,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(`/api/addressbooks/${id}/export`, {
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      let msg = `Export failed (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data.error) msg = data.error;
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(msg, res.status);
+    }
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/i.exec(cd);
+    const filename = m?.[1] || `contacts-${id}.vcf`;
+    const blob = await res.blob();
+    return { blob, filename };
+  },
+  importAddressBook: (id: number, vcf: string) =>
+    request<ImportResult>(`/addressbooks/${id}/import`, {
+      method: "POST",
+      body: JSON.stringify({ vcf }),
     }),
 };
 

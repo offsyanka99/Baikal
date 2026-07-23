@@ -1,4 +1,4 @@
-Baïkal (fork) · 0.11.1-fork.1
+Baïkal (fork) · 0.11.1-fork.2
 =============================
 
 [![continuous-integration](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml/badge.svg)](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml)
@@ -6,7 +6,7 @@ Baïkal (fork) · 0.11.1-fork.1
 
 Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server based on upstream **0.11.1**, with packaging and UX for self-hosted / TrueNAS deployments.
 
-**This release:** `0.11.1-fork.1` (not an upstream sabre-io tag).  
+**This release:** `0.11.1-fork.2` (not an upstream sabre-io tag).  
 **Docs:** [docs/](docs/) · [Deployment](docs/DEPLOYMENT.md) · [TrueNAS compose](docs/truenas-scale.compose.yaml)
 
 Fork of Baïkal with:
@@ -17,7 +17,11 @@ Fork of Baïkal with:
 - System settings for **Tasks (VTODO)** and **Notes (VJOURNAL)**
 - `/health.php` and `/info.php` for monitoring
 - CalDAV **calendar-timezone** dual-format fix (plain Olson id + VTIMEZONE) for Home Assistant expand queries
-- **User portal** (`/portal/`) — TypeScript SPA + PHP API: create/edit calendars (name, color, description), share with other users; `/dav.php/` kept as classic backup
+- **User portal** (`/portal/`) — TypeScript SPA + PHP API:
+  - **My Calendars** tab: create/edit (name, color, description), holidays calendars, read-only flag, import/export `.ics`, share
+  - **My Contacts** tab: address books, import/export `.vcf`
+  - Info **(i)** modals instead of long inline help
+- `/dav.php/` kept as classic backup browser and CalDAV/CardDAV endpoint
 
 Upstream project: [sabre-io/Baikal](https://github.com/sabre-io/Baikal).  
 Official docs: [sabre.io/baikal](https://sabre.io/baikal/).
@@ -28,20 +32,21 @@ Versioning
 | Version | Meaning |
 |---------|---------|
 | `0.11.1` | Upstream Baikal line this fork is based on |
-| `0.11.1-fork.1` | This fork’s first packaged release (portal, HA timezone, Docker/TrueNAS) |
+| `0.11.1-fork.1` | First packaged release (portal v1, HA timezone, Docker/TrueNAS) |
+| `0.11.1-fork.2` | Portal calendars/contacts polish: import/export, holidays, tabs, UI |
 
-Image tags: `latest`, `0.11.1-fork.1`, `sha-…`.
+Image tags: `latest`, `0.11.1-fork.2`, `sha-…`.
 
 Quick start (Docker)
 --------------------
 
 ```bash
-docker pull ghcr.io/offsyanka99/baikal:0.11.1-fork.1
+docker pull ghcr.io/offsyanka99/baikal:0.11.1-fork.2
 # or: ghcr.io/offsyanka99/baikal:latest
 docker run -d --name baikal -p 8080:80 \
   -v baikal-config:/var/www/baikal/config \
   -v baikal-data:/var/www/baikal/Specific \
-  ghcr.io/offsyanka99/baikal:0.11.1-fork.1
+  ghcr.io/offsyanka99/baikal:0.11.1-fork.2
 ```
 
 Then open http://127.0.0.1:8080/ and run the installer.
@@ -57,7 +62,7 @@ Endpoints
 
 | Path | Use |
 |------|-----|
-| `/portal/` | **User portal** — calendars (name/color/description), sharing |
+| `/portal/` | **User portal** — calendars + contacts |
 | `/dav.php/` | CalDAV + CardDAV (clients + classic WebDAV browser) |
 | `/admin/` | Web admin |
 | `/api/` | Portal JSON API (session cookie) |
@@ -68,11 +73,11 @@ User portal
 -----------
 
 1. Admin creates DAV users under `/admin/`.
-2. Each user opens **`/portal/`**, signs in with **DAV** credentials.
-3. Create or edit calendars (display name, color, description).
-4. Share with another user → **Read only** or **Full access** → Revoke as needed.
+2. Open **`/portal/`**, sign in with **DAV** credentials.
+3. **My Calendars:** create/edit calendars, holidays, share, import/export `.ics`.
+4. **My Contacts:** select address book, import/export `.vcf`.
 
-`/dav.php/` remains available as the original sabre browser (and for all CalDAV clients).
+`/dav.php/` remains available as the original sabre browser (and for all CalDAV/CardDAV clients).
 
 Home Assistant
 --------------
@@ -95,14 +100,23 @@ calendar-timezone fix) are applied automatically via
 Changelog (fork)
 ----------------
 
+### 0.11.1-fork.2
+
+- Portal tabs: **My Calendars** / **My Contacts**
+- Calendar import/export (`.ics`), including large Thunderbird exports (timeouts raised)
+- Holidays calendar option (country picker, Nager.Date) + read-only flag
+- Contacts import/export (`.vcf`)
+- Info **(i)** modals for section help; left column layout / badge overlap fixes
+- Import result messages in the UI
+
 ### 0.11.1-fork.1
 
 - User portal at `/portal/` (bookmarks-sync style UI) + `/api/` session API
 - Calendar create/edit: display name, color, description
 - Calendar sharing with other Baikal users (read / full access)
 - Dual-format `calendar-timezone` for Home Assistant expand queries
-- Docker multi-arch image (GHCR), TrueNAS SCALE compose, health/info endpoints
-- Admin hardening and Tasks/Notes system flags (carried from earlier fork work)
+- Docker/GHCR multi-arch, TrueNAS compose, health/info endpoints
+- Admin hardening and Tasks/Notes system flags
 
 Credits
 -------

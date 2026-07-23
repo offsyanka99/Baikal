@@ -1,5 +1,5 @@
 # Baïkal — TrueNAS SCALE custom app (GHCR image from offsyanka99/Baikal)
-# Release: 0.11.1-fork.1  ·  docs: https://github.com/offsyanka99/Baikal/tree/master/docs
+# Release: 0.11.1-fork.2  ·  docs: https://github.com/offsyanka99/Baikal/tree/master/docs
 #
 # Use: Apps → Discover apps → Custom App / Install via YAML
 #      (Electric Eel / 24.10+ Docker-based SCALE)
@@ -18,7 +18,7 @@
 # After deploy:
 # 1. Open http://NAS-IP:31088  → complete installer (admin password; SQLite OK)
 # 2. Admin:  http://NAS-IP:31088/admin/
-# 3. Portal: http://NAS-IP:31088/portal/   ← user login, share calendars
+# 3. Portal: http://NAS-IP:31088/portal/   ← calendars + contacts (DAV user login)
 # 4. DAV:    http://NAS-IP:31088/dav.php/  ← clients + classic browser
 # 5. Health: http://NAS-IP:31088/health.php
 # 6. Info:   http://NAS-IP:31088/info.php
@@ -26,9 +26,9 @@
 # Portal (user-friendly):
 #   1. Admin creates user1 + user2 under /admin/
 #   2. user1 opens /portal/ , signs in with DAV password
-#   3. Add/edit calendars (name, color, description)
-#   4. Share → pick user2 → Read only or Full access
-#   Classic backup UI: /dav.php/ → calendar → Actions → mailto:…
+#   3. My Calendars: add/edit (name, color, description), holidays, share, import/export .ics
+#   4. My Contacts: select address book, import/export .vcf
+#   Classic backup UI: /dav.php/
 #
 # Home Assistant CalDAV:
 #   URL:  http://NAS-IP:31088/dav.php/  (prefer HTTPS via reverse proxy)
@@ -38,7 +38,8 @@
 #
 # Backup regularly (both mounts):
 #   config/   → baikal.yaml (admin hash, auth, feature flags)
-#   Specific/ → SQLite DB (Specific/db), INSTALL_DISABLED, rate-limit file
+#   Specific/ → SQLite DB (Specific/db), INSTALL_DISABLED, rate-limit file,
+#               portal_meta.json (read-only / holidays flags)
 #
 # Auth notes:
 #   Digest auth stores MD5 A1 hashes for DAV users (protocol design).
@@ -55,7 +56,7 @@
 services:
   baikal:
     # --- Preferred: pin this fork release ---------------------------------
-    image: ghcr.io/offsyanka99/baikal:0.11.1-fork.1
+    image: ghcr.io/offsyanka99/baikal:0.11.1-fork.2
     # Or track master builds:
     # image: ghcr.io/offsyanka99/baikal:latest
     # image: ghcr.io/offsyanka99/baikal:sha-<git-sha>
