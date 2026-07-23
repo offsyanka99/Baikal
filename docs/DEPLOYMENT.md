@@ -20,10 +20,29 @@ Multi-arch: `linux/amd64`, `linux/arm64`.
 See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 
 1. Create dataset dirs and `chown -R 101:101` (nginx UID in the image).
-2. Install via Custom App YAML.
-3. Complete the web installer once.
-4. Put **HTTPS** in front (TrueNAS proxy, Caddy, Traefik). Do not expose plain HTTP to the internet.
-5. After install, ensure `Specific/INSTALL_DISABLED` exists, or set env **`BAIKAL_LOCK_INSTALL=1`** so the installer cannot reopen if the marker is deleted.
+2. Install via Custom App YAML. Prefer **`image: …:latest`** (or a pinned tag) — pull only; do not use the `build:` block on the NAS.
+3. Set **`BAIKAL_SKIP_CHOWN=1`** after host `chown 101:101` so startup does not re-chown mounts (avoids hanging on `40-fix-baikal-file-permissions.sh`).
+4. Complete the web installer once.
+5. Put **HTTPS** in front (TrueNAS proxy, Caddy, Traefik). Do not expose plain HTTP to the internet.
+6. After install, ensure `Specific/INSTALL_DISABLED` exists, or set env **`BAIKAL_LOCK_INSTALL=1`** so the installer cannot reopen if the marker is deleted.
+
+### Stuck on `40-fix-baikal-file-permissions.sh`?
+
+The entrypoint was doing a recursive `chown` that can take a very long time on TrueNAS bind mounts. Current images only chown `config/` + `Specific/`, and log start/done. If it still hangs:
+
+```bash
+# On the NAS host (adjust path):
+chown -R 101:101 /mnt/tank/apps/baikal
+```
+
+Then in compose:
+
+```yaml
+environment:
+  BAIKAL_SKIP_CHOWN: "1"
+```
+
+Redeploy / recreate the container (not only restart).
 
 ### Volumes to back up
 
@@ -196,7 +215,7 @@ There is no separate “TasksDAV” / “NotesDAV”: tasks are **VTODO**, notes
 | `TZ` | e.g. `America/Toronto` | Container timezone (logs, PHP defaults) |
 | `BAIKAL_LOCK_INSTALL` | `1` | Force installer lock even if `INSTALL_DISABLED` is missing |
 | `BAIKAL_ALLOW_REINSTALL` | `1` | Allow re-opening the installer when lock env is set |
-| `BAIKAL_SKIP_CHOWN` | `1` | Skip entrypoint chown of mounted volumes |
+| `BAIKAL_SKIP_CHOWN` | `1` | Skip entrypoint chown of `config/` + `Specific/` (use after host `chown 101:101`; recommended on TrueNAS) |
 | `TIME_FORMAT` / `BAIKAL_PORTAL_TIME_FORMAT` | `auto` (default), `12h`, `24h` | Portal time display |
 | `BAIKAL_PORTAL_WEEK_START` | `auto` (default), `monday`, `sunday` | Portal calendar week start |
 | `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL` | `off` (default), `error`, `warn`, `info`, `debug` | Portal debug logs (browser console + PHP `error_log`) |

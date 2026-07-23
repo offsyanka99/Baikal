@@ -12,6 +12,8 @@
 #      mkdir -p /mnt/tank/apps/baikal/config /mnt/tank/apps/baikal/Specific/db
 # 2. Ownership for nginx inside the image (uid/gid 101):
 #      chown -R 101:101 /mnt/tank/apps/baikal
+#    Then set BAIKAL_SKIP_CHOWN=1 below so startup does not re-chown mounts
+#    (avoids a long hang on 40-fix-baikal-file-permissions.sh).
 # 3. Edit volumes host path and host port if needed
 # 4. Prefer HTTPS via TrueNAS reverse proxy / Caddy / Traefik in production
 #
@@ -91,9 +93,10 @@ services:
       BAIKAL_PORTAL_WEEK_START: "monday" # or sunday
       # Portal debug (browser DevTools + container logs). Default off.
       # PORTAL_LOG_LEVEL: "debug"        # off|error|warn|info|debug
+      # Skip entrypoint chown (recommended on TrueNAS after host chown 101:101):
+      BAIKAL_SKIP_CHOWN: "1"
       # After first successful install, recommended for internet-facing hosts:
       # BAIKAL_LOCK_INSTALL: "1"
-      # BAIKAL_SKIP_CHOWN: "1"
       # MSMTPRC: |
       #   defaults
       #   auth on
