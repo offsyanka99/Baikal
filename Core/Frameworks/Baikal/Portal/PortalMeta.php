@@ -4,7 +4,10 @@ namespace Baikal\Portal;
 
 /**
  * Lightweight per-calendar flags for the user portal (read-only, holidays country).
- * Stored under Specific/portal_meta.json (not used by DAV clients).
+ * Stored under Specific/portal_meta.json.
+ *
+ * The read-only flag is also enforced for CalDAV clients by
+ * {@see \Baikal\Core\Plugins\ReadOnlyPlugin} (registered on the DAV server).
  */
 class PortalMeta {
     /** @var string */

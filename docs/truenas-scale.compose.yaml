@@ -1,5 +1,5 @@
 # Baïkal — TrueNAS SCALE custom app (GHCR image from offsyanka99/Baikal)
-# Release: 0.11.1-fork.2  ·  docs: https://github.com/offsyanka99/Baikal/tree/master/docs
+# Release: 0.11.1-fork.3  ·  docs: https://github.com/offsyanka99/Baikal/tree/master/docs
 #
 # Use: Apps → Discover apps → Custom App / Install via YAML
 #      (Electric Eel / 24.10+ Docker-based SCALE)
@@ -56,7 +56,7 @@
 services:
   baikal:
     # --- Preferred: pin this fork release ---------------------------------
-    image: ghcr.io/offsyanka99/baikal:0.11.1-fork.2
+    image: ghcr.io/offsyanka99/baikal:0.11.1-fork.3
     # Or track master builds:
     # image: ghcr.io/offsyanka99/baikal:latest
     # image: ghcr.io/offsyanka99/baikal:sha-<git-sha>

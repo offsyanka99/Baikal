@@ -17,9 +17,19 @@ class App {
     /** @var ContactService */
     private $contacts;
 
+    /** @var array<string, mixed>|null Cached JSON body (php://input is one-shot) */
+    private $jsonBodyCache = null;
+
     public function __construct(\PDO $pdo, array $config) {
         $realm = (string) ($config['system']['auth_realm'] ?? 'BaikalDAV');
-        $this->auth = new Auth($pdo, $realm);
+        $sessionMax = Auth::DEFAULT_SESSION_MAX_AGE;
+        if (isset($config['system']['session_max_age_minutes'])
+            && is_numeric($config['system']['session_max_age_minutes'])
+            && (int) $config['system']['session_max_age_minutes'] > 0
+        ) {
+            $sessionMax = (int) $config['system']['session_max_age_minutes'] * 60;
+        }
+        $this->auth = new Auth($pdo, $realm, $sessionMax);
         $this->shares = new ShareService($pdo);
         $this->contacts = new ContactService($pdo);
     }
@@ -76,6 +86,22 @@ class App {
 
                 return;
             }
+            // Contact photo binary (JPEG)
+            if ($method === 'GET' && preg_match('#^/addressbooks/(\d+)/contacts/([^/]+)/photo$#', $path, $m)) {
+                $username = $this->auth->requireUser();
+                $photo = $this->contacts->getContactPhoto($username, (int) $m[1], rawurldecode($m[2]));
+                if ($photo === null) {
+                    throw new ApiException('Contact has no photo', 404);
+                }
+                http_response_code(200);
+                header('Content-Type: ' . $photo['contentType']);
+                header('Cache-Control: private, max-age=300');
+                header('X-Content-Type-Options: nosniff');
+                header('Content-Length: ' . (string) strlen($photo['bytes']));
+                echo $photo['bytes'];
+
+                return;
+            }
 
             $result = $this->dispatch($method, $path);
             $this->json(200, $result);
@@ -97,6 +123,7 @@ class App {
      */
     private function dispatch(string $method, string $path) {
         if ($method === 'POST' && $path === '/login') {
+            $this->assertSameOrigin();
             $body = $this->jsonBody();
             $user = $this->auth->login(
                 (string) ($body['username'] ?? ''),
@@ -106,19 +133,34 @@ class App {
             return ['user' => $user];
         }
 
-        if ($method === 'POST' && $path === '/logout') {
-            $this->auth->logout();
+        // State-changing requests: same-origin + CSRF (when a session exists)
+        if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            $this->assertSameOrigin();
+            $sessionUser = $this->auth->username();
+            if ($path === '/logout') {
+                if ($sessionUser !== null) {
+                    $this->auth->assertCsrf($this->csrfFromRequest());
+                }
+                $this->auth->logout();
 
-            return ['ok' => true];
+                return ['ok' => true];
+            }
+            if ($sessionUser === null) {
+                throw new ApiException('Not authenticated', 401);
+            }
+            $this->auth->assertCsrf($this->csrfFromRequest());
         }
 
         if ($method === 'GET' && ($path === '/me' || $path === '')) {
             $username = $this->auth->requireUser();
+            $profile = $this->auth->profile($username);
+            $profile['csrfToken'] = $this->auth->csrfToken();
 
             return [
-                'user'    => $this->auth->profile($username),
-                'version' => defined('BAIKAL_VERSION') ? BAIKAL_VERSION : null,
-                'davPath' => '/dav.php/',
+                'user'      => $profile,
+                'csrfToken' => $this->auth->csrfToken(),
+                'version'   => defined('BAIKAL_VERSION') ? BAIKAL_VERSION : null,
+                'davPath'   => '/dav.php/',
             ];
         }
 
@@ -195,6 +237,30 @@ class App {
             return ['addressbooks' => $this->contacts->listAddressBooks($username)];
         }
 
+        if ($method === 'POST' && $path === '/addressbooks') {
+            $body = $this->jsonBody();
+            $ab = $this->contacts->createAddressBook($username, $body);
+
+            return ['addressbook' => $ab];
+        }
+
+        if (preg_match('#^/addressbooks/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            if ($method === 'PATCH' || $method === 'PUT') {
+                $body = $this->jsonBody();
+                $ab = $this->contacts->updateAddressBook($username, $id, $body);
+
+                return ['addressbook' => $ab];
+            }
+            if ($method === 'DELETE') {
+                $body = $this->jsonBody();
+                $force = !empty($body['force']) || (isset($_GET['force']) && $_GET['force'] !== '0' && $_GET['force'] !== '');
+                $this->contacts->deleteAddressBook($username, $id, $force);
+
+                return ['ok' => true];
+            }
+        }
+
         if ($method === 'POST' && preg_match('#^/addressbooks/(\d+)/import$#', $path, $m)) {
             $id = (int) $m[1];
             $vcf = $this->readPayloadField('vcf', ['text/vcard', 'text/x-vcard', 'text/directory']);
@@ -203,11 +269,90 @@ class App {
             return $result;
         }
 
+        // GET list / POST create contacts
+        if (preg_match('#^/addressbooks/(\d+)/contacts$#', $path, $m)) {
+            $id = (int) $m[1];
+            if ($method === 'GET') {
+                $q = isset($_GET['q']) ? (string) $_GET['q'] : '';
+
+                return ['contacts' => $this->contacts->listContacts($username, $id, $q)];
+            }
+            if ($method === 'POST') {
+                $body = $this->jsonBody();
+                $contact = $this->contacts->createContact($username, $id, $body);
+
+                return ['contact' => $contact];
+            }
+        }
+
+        // GET / PATCH / DELETE one contact
+        if (preg_match('#^/addressbooks/(\d+)/contacts/([^/]+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $uri = rawurldecode($m[2]);
+            if ($method === 'GET') {
+                return ['contact' => $this->contacts->getContact($username, $id, $uri)];
+            }
+            if ($method === 'PATCH' || $method === 'PUT') {
+                $body = $this->jsonBody();
+                $contact = $this->contacts->updateContact($username, $id, $uri, $body);
+
+                return ['contact' => $contact];
+            }
+            if ($method === 'DELETE') {
+                $this->contacts->deleteContact($username, $id, $uri);
+
+                return ['ok' => true];
+            }
+        }
+
         throw new ApiException('Not found', 404);
     }
 
     private function readIcsPayload(): string {
         return $this->readPayloadField('ics', ['text/calendar']);
+    }
+
+    private function csrfFromRequest(): string {
+        $h = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_SERVER['HTTP_X_BAIKAL_CSRF'] ?? '';
+        if (is_string($h) && $h !== '') {
+            return $h;
+        }
+
+        return '';
+    }
+
+    /**
+     * Reject cross-site browser requests (defense in depth with SameSite=Lax).
+     */
+    private function assertSameOrigin(): void {
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        if ($host === '') {
+            return;
+        }
+        $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+        if (is_string($origin) && $origin !== '') {
+            $parts = parse_url($origin);
+            $oh = $parts['host'] ?? '';
+            if (isset($parts['port'])) {
+                $oh .= ':' . $parts['port'];
+            }
+            if ($oh === '' || strcasecmp($oh, $host) !== 0) {
+                throw new ApiException('Cross-origin request blocked', 403);
+            }
+
+            return;
+        }
+        $referer = $_SERVER['HTTP_REFERER'] ?? '';
+        if (is_string($referer) && $referer !== '') {
+            $parts = parse_url($referer);
+            $rh = $parts['host'] ?? '';
+            if (isset($parts['port'])) {
+                $rh .= ':' . $parts['port'];
+            }
+            if ($rh !== '' && strcasecmp($rh, $host) !== 0) {
+                throw new ApiException('Cross-origin request blocked', 403);
+            }
+        }
     }
 
     /**
@@ -247,14 +392,20 @@ class App {
      * @return array<string, mixed>
      */
     private function jsonBody(): array {
+        if ($this->jsonBodyCache !== null) {
+            return $this->jsonBodyCache;
+        }
         $raw = file_get_contents('php://input');
         if ($raw === false || trim($raw) === '') {
+            $this->jsonBodyCache = [];
+
             return [];
         }
         $data = json_decode($raw, true);
         if (!is_array($data)) {
             throw new ApiException('Invalid JSON body', 400);
         }
+        $this->jsonBodyCache = $data;
 
         return $data;
     }
@@ -267,7 +418,18 @@ class App {
         header('Content-Type: application/json; charset=utf-8');
         header('Cache-Control: no-store');
         header('X-Content-Type-Options: nosniff');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+        // JSON_INVALID_UTF8_SUBSTITUTE: never fail the whole API if one field has bad bytes
+        $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+        if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+            $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+        }
+        $json = json_encode($payload, $flags);
+        if ($json === false) {
+            error_log('Baikal portal JSON encode failed: ' . json_last_error_msg());
+            $json = json_encode(['error' => 'Response encoding failed'], JSON_UNESCAPED_SLASHES) ?: '{"error":"Response encoding failed"}';
+            http_response_code(500);
+        }
+        echo $json . "\n";
     }
 
     private function fileDownload(string $body, string $filename, string $contentType): void {

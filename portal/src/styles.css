@@ -270,23 +270,56 @@ label {
 
 input[type="text"],
 input[type="password"],
-select {
+input[type="email"],
+input[type="tel"],
+input[type="url"],
+input[type="search"],
+input[type="number"],
+select,
+textarea {
   width: 100%;
+  max-width: 100%;
   padding: 0.6rem 0.75rem;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text);
   font: inherit;
+  box-sizing: border-box;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+  line-height: 1.45;
 }
 
 select {
   cursor: pointer;
 }
 
-input:focus {
+input::placeholder,
+textarea::placeholder {
+  color: #6b7c94;
+  opacity: 1;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
   outline: 2px solid rgba(59, 130, 246, 0.45);
   border-color: var(--primary);
+}
+
+/* Native search clear button on dark surfaces */
+input[type="search"] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button {
+  filter: invert(0.75);
 }
 
 .checkbox {
@@ -735,6 +768,313 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+}
+
+.contact-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.contact-toolbar input[type="search"] {
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 22rem;
+}
+
+/* Google Contacts–style list table */
+.contacts-table-wrap {
+  max-height: min(56vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.contacts-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.92rem;
+}
+
+.contacts-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: #1e2a3d;
+  border-bottom: 1px solid var(--border);
+  padding: 0.65rem 0.85rem;
+  white-space: nowrap;
+}
+
+.contacts-table tbody td {
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid rgba(45, 58, 79, 0.65);
+  vertical-align: middle;
+  color: var(--text);
+}
+
+.contacts-table tbody tr.contact-table-row {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.contacts-table tbody tr.contact-table-row:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.contacts-table tbody tr.contact-table-row.is-selected {
+  background: rgba(59, 130, 246, 0.18);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.contacts-table tbody tr.contact-table-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.contacts-empty-row td {
+  padding: 1.25rem 0.85rem;
+  text-align: center;
+}
+
+.contact-col-name {
+  width: 34%;
+}
+
+.contact-col-email {
+  width: 28%;
+}
+
+.contact-col-phone {
+  width: 18%;
+}
+
+.contact-col-org {
+  width: 20%;
+}
+
+.contact-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.contact-name-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.contact-name-primary {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-name-secondary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-cell-clip {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.contact-table-row.is-selected .contact-cell-clip,
+.contact-table-row.is-selected .contact-name-secondary {
+  color: #c5d4ea;
+}
+
+@media (max-width: 720px) {
+  .hide-sm {
+    display: none;
+  }
+  .contact-col-name {
+    width: 42%;
+  }
+  .contact-col-email {
+    width: 32%;
+  }
+  .contact-col-phone {
+    width: 26%;
+  }
+}
+
+.section-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0 0 1rem;
+}
+
+.form-actions-wrap {
+  flex-wrap: wrap;
+}
+
+.contact-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.contact-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--muted);
+  background: var(--surface);
+}
+
+.contact-avatar-lg {
+  width: 72px;
+  height: 72px;
+  font-size: 1.5rem;
+}
+
+.contact-photo-row {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.contact-photo-preview img {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+.form-grid-2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 560px) {
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.multi-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.45rem;
+  max-width: 100%;
+}
+
+.multi-row input[type="email"],
+.multi-row input[type="tel"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.multi-row-phone select {
+  flex: 0 0 5.75rem;
+  width: auto;
+  padding-left: 0.5rem;
+  padding-right: 0.4rem;
+}
+
+.multi-row .btn {
+  flex: 0 0 auto;
+}
+
+/* Compact contact contact-detail fields */
+.contact-field-short {
+  max-width: 22rem;
+}
+
+.contact-email-phone {
+  align-items: start;
+}
+
+.contact-email-phone .fieldset {
+  max-width: none;
+  min-width: 0;
+}
+
+.fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem 0.9rem;
+  margin: 0;
+  max-width: 28rem;
+}
+
+.fieldset legend {
+  padding: 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.fieldset-address {
+  max-width: none;
+}
+
+.fieldset-custom {
+  max-width: none;
+}
+
+.multi-row-custom {
+  max-width: 40rem;
+}
+
+.multi-row-custom input[name^="custom_label_"] {
+  flex: 0 1 10rem;
+  min-width: 7rem;
+  max-width: 12rem;
+}
+
+.multi-row-custom input[name^="custom_value_"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.contacts-sidebar {
+  gap: 0;
+}
+
+.contacts-sidebar > .card {
+  margin-bottom: 1.25rem;
+}
+
+.contacts-sidebar > .card:last-child {
+  margin-bottom: 0;
+}
+
+.ab-manage label {
+  font-size: 0.88rem;
+}
+
+.h3-inline {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
 }
 
 .cal-row {

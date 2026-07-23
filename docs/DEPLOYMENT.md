@@ -1,6 +1,6 @@
 # Deployment guide (fork)
 
-**Version:** `0.11.1-fork.2` (based on upstream Baikal 0.11.1)
+**Version:** `0.11.1-fork.3` (based on upstream Baikal 0.11.1)
 
 This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SCALE, and adds admin hardening, system Tasks/Notes flags, health endpoints, a dual-format CalDAV calendar-timezone fix for Home Assistant, and a **user portal** for calendars and contacts.
 
@@ -8,7 +8,7 @@ This fork packages [Baïkal](https://sabre.io/baikal/) for Docker and TrueNAS SC
 
 | Image | When |
 |-------|------|
-| `ghcr.io/offsyanka99/baikal:0.11.1-fork.2` | **Pin for production** (this release) |
+| `ghcr.io/offsyanka99/baikal:0.11.1-fork.3` | **Pin for production** (this release) |
 | `ghcr.io/offsyanka99/baikal:latest` | Default tracking `master` (GitHub Actions) |
 | `ghcr.io/offsyanka99/baikal:sha-…` | Pin to a git SHA |
 | Build from `Dockerfile` | Dev / offline packaging |
@@ -23,6 +23,7 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 2. Install via Custom App YAML.
 3. Complete the web installer once.
 4. Put **HTTPS** in front (TrueNAS proxy, Caddy, Traefik). Do not expose plain HTTP to the internet.
+5. After install, ensure `Specific/INSTALL_DISABLED` exists, or set env **`BAIKAL_LOCK_INSTALL=1`** so the installer cannot reopen if the marker is deleted.
 
 ### Volumes to back up
 
@@ -54,7 +55,7 @@ Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
 | 3 | **My Calendars:** add/edit calendars, holidays, share, import/export `.ics` |
-| 4 | **My Contacts:** select address book, import/export `.vcf` |
+| 4 | **My Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf` |
 
 ### Screenshots
 
@@ -62,15 +63,18 @@ Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
 
 ![User portal — My Calendars](images/portal-my-calendars.jpg)
 
-**My Contacts** — address books, import/export `.vcf`, import result banner:
+**My Contacts** — address books (create/rename/delete), Google-style contact table, search, edit form with photo, import/export `.vcf`:
 
-![User portal — My Contacts](images/portal-my-contacts.png)
+![User portal — My Contacts](images/portal-my-contacts.jpg)
 
 - Backend: PHP API under `/api/` (session cookie; sabre CalDAV/CardDAV backends).
 - Frontend source: [`portal/`](../portal/) (Vite + TypeScript); image build compiles into `html/portal/`.
 - Footer **Docs** → [github.com/offsyanka99/Baikal/tree/master/docs](https://github.com/offsyanka99/Baikal/tree/master/docs).
 - **`/dav.php/` is unchanged** — CalDAV/CardDAV for clients and classic browser backup.
 - Portal meta (read-only / holidays flags): `Specific/portal_meta.json` (include in backups).
+- **Read-only calendars** are enforced on CalDAV (`/dav.php/`, `/cal.php/`) via `ReadOnlyPlugin` — clients get **403** on write methods, not only a portal import block.
+- Contact photos require **PHP GD** (`php8.2-gd` in the Docker image); stored as **vCard 3.0** `PHOTO;ENCODING=b` JPEG (avoids vCard 4 raw-binary corruption).
+- Portal sessions: idle timeout from `session_max_age_minutes` (same as admin, default 15); login rate-limited; CSRF + same-origin checks on mutations.
 
 ### API (summary)
 
@@ -84,8 +88,15 @@ Tabs: **My Calendars** · **My Contacts**. Section help is under **(i)** icons.
 | POST | `/api/calendars/{id}/import` | Import `.ics` body `{ics}` |
 | POST/DELETE | `/api/calendars/{id}/shares` | Share / revoke |
 | GET | `/api/addressbooks` | List address books |
+| POST | `/api/addressbooks` | Create address book |
+| PATCH | `/api/addressbooks/{id}` | Rename / description |
+| DELETE | `/api/addressbooks/{id}` | Delete (`force` if non-empty) |
 | GET | `/api/addressbooks/{id}/export` | Download `.vcf` |
 | POST | `/api/addressbooks/{id}/import` | Import `.vcf` body `{vcf}` |
+| GET | `/api/addressbooks/{id}/contacts` | List/search contacts (`?q=`) |
+| POST | `/api/addressbooks/{id}/contacts` | Create contact |
+| GET/PATCH/DELETE | `/api/addressbooks/{id}/contacts/{uri}` | Get / update / delete contact |
+| GET | `/api/addressbooks/{id}/contacts/{uri}/photo` | Contact photo JPEG |
 | GET | `/api/holidays/countries` | Country list for holidays calendars |
 
 See [`portal/README.md`](../portal/README.md).
@@ -188,9 +199,16 @@ if a new sabre/dav release changes those files.
 ## Upstream
 
 Core CalDAV/CardDAV remains based on [sabre-io/Baikal](https://github.com/sabre-io/Baikal) **0.11.1**.  
-Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.2`). Prefer rebasing packaging onto upstream releases regularly.
+Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.3`). Prefer rebasing packaging onto upstream releases regularly.
 
 ## Release notes
+
+### 0.11.1-fork.3
+
+- Full portal contacts: address book CRUD, contact table/search/edit, photos, multi email/phone, Unicode custom fields
+- CalDAV `ReadOnlyPlugin` for portal read-only calendars
+- Portal auth hardening (rate limit, idle timeout, CSRF/same-origin), import quotas, GD photos, CSP
+- Updated My Contacts screenshot
 
 ### 0.11.1-fork.2
 

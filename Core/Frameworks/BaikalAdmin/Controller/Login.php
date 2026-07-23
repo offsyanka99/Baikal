@@ -63,8 +63,7 @@ class Login extends \Flake\Core\Controller {
             );
         }
 
-        $sPassword = htmlspecialchars(\Flake\Util\Tools::POST("password"));
-
+        // Never re-populate password after a failed attempt (avoids password in HTML/DOM)
         if (trim($sLogin) === "") {
             $sLogin = "admin";
         }
@@ -74,7 +73,7 @@ class Login extends \Flake\Core\Controller {
         $oView->setData("actionurl", $sActionUrl);
         $oView->setData("submittedflagname", $sSubmittedFlagName);
         $oView->setData("login", $sLogin);
-        $oView->setData("password", $sPassword);
+        $oView->setData("password", "");
 
         return $oView->render();
     }

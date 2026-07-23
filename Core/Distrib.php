@@ -25,5 +25,5 @@
 #  This copyright notice MUST APPEAR in all copies of the script!
 #################################################################
 
-define("BAIKAL_VERSION", "0.11.1-fork.2");
+define("BAIKAL_VERSION", "0.11.1-fork.3");
 define("BAIKAL_HOMEPAGE", "https://github.com/offsyanka99/Baikal");

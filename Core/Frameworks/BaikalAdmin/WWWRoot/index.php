@@ -76,7 +76,7 @@ if (!\BaikalAdmin\Core\Auth::isAuthenticated()) {
         if (!isset($_POST['CSRF_TOKEN'])) {
             throw new \Exception('CSRF token was not submitted. Try removing your cookies and log in again');
         }
-        if ($_POST['CSRF_TOKEN'] !== $_SESSION['CSRF_TOKEN']) {
+        if (!hash_equals((string) $_SESSION['CSRF_TOKEN'], (string) $_POST['CSRF_TOKEN'])) {
             throw new \Exception('CSRF token did not match the session CSRF token. Please try to do this action again.');
         }
     }

@@ -238,14 +238,14 @@ class Auth {
             // keep default
         }
 
-        ini_set('session.gc_maxlifetime', (string) $maxAge);
-        ini_set('session.cookie_httponly', '1');
-        ini_set('session.use_strict_mode', '1');
-        if (\Flake\Util\Tools::getCurrentProtocol() === 'https') {
-            ini_set('session.cookie_secure', '1');
-        }
-
+        // Only change session ini before a session is active (portal may already have started one)
         if (session_status() === PHP_SESSION_NONE) {
+            ini_set('session.gc_maxlifetime', (string) $maxAge);
+            ini_set('session.cookie_httponly', '1');
+            ini_set('session.use_strict_mode', '1');
+            if (\Flake\Util\Tools::getCurrentProtocol() === 'https') {
+                ini_set('session.cookie_secure', '1');
+            }
             session_set_cookie_params([
                 'lifetime' => 0,
                 'path'     => '/',

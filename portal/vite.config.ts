@@ -6,7 +6,8 @@ export default defineConfig({
   build: {
     outDir: "../html/portal",
     emptyOutDir: true,
-    sourcemap: true,
+    // Omit source maps from production images (smaller + less recon surface)
+    sourcemap: false,
   },
   server: {
     port: 5173,

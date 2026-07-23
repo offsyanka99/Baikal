@@ -1,4 +1,4 @@
-Baïkal (fork) · 0.11.1-fork.2
+Baïkal (fork) · 0.11.1-fork.3
 =============================
 
 [![continuous-integration](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml/badge.svg)](https://github.com/offsyanka99/Baikal/actions/workflows/ci.yml)
@@ -6,7 +6,7 @@ Baïkal (fork) · 0.11.1-fork.2
 
 Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server based on upstream **0.11.1**, with packaging and UX for self-hosted / TrueNAS deployments.
 
-**This release:** `0.11.1-fork.2` (not an upstream sabre-io tag).  
+**This release:** `0.11.1-fork.3` (not an upstream sabre-io tag).  
 **Docs:** [docs/](docs/) · [Deployment](docs/DEPLOYMENT.md) · [TrueNAS compose](docs/truenas-scale.compose.yaml)
 
 Fork of Baïkal with:
@@ -18,8 +18,8 @@ Fork of Baïkal with:
 - `/health.php` and `/info.php` for monitoring
 - CalDAV **calendar-timezone** dual-format fix (plain Olson id + VTIMEZONE) for Home Assistant expand queries
 - **User portal** (`/portal/`) — TypeScript SPA + PHP API:
-  - **My Calendars** tab: create/edit (name, color, description), holidays calendars, read-only flag, import/export `.ics`, share
-  - **My Contacts** tab: address books, import/export `.vcf`
+  - **My Calendars** tab: create/edit (name, color, description), holidays calendars, read-only flag (enforced on CalDAV), import/export `.ics`, share
+  - **My Contacts** tab: address books (CRUD), contact list/search/edit, multi email/phone, photos, import/export `.vcf`
   - Info **(i)** modals instead of long inline help
 - `/dav.php/` kept as classic backup browser and CalDAV/CardDAV endpoint
 
@@ -34,19 +34,20 @@ Versioning
 | `0.11.1` | Upstream Baikal line this fork is based on |
 | `0.11.1-fork.1` | First packaged release (portal v1, HA timezone, Docker/TrueNAS) |
 | `0.11.1-fork.2` | Portal calendars/contacts polish: import/export, holidays, tabs, UI |
+| `0.11.1-fork.3` | Full portal contacts CRUD, CalDAV read-only plugin, portal security hardening |
 
-Image tags: `latest`, `0.11.1-fork.2`, `sha-…`.
+Image tags: `latest`, `0.11.1-fork.3`, `sha-…`.
 
 Quick start (Docker)
 --------------------
 
 ```bash
-docker pull ghcr.io/offsyanka99/baikal:0.11.1-fork.2
+docker pull ghcr.io/offsyanka99/baikal:0.11.1-fork.3
 # or: ghcr.io/offsyanka99/baikal:latest
 docker run -d --name baikal -p 8080:80 \
   -v baikal-config:/var/www/baikal/config \
   -v baikal-data:/var/www/baikal/Specific \
-  ghcr.io/offsyanka99/baikal:0.11.1-fork.2
+  ghcr.io/offsyanka99/baikal:0.11.1-fork.3
 ```
 
 Then open http://127.0.0.1:8080/ and run the installer.
@@ -75,11 +76,11 @@ User portal
 1. Admin creates DAV users under `/admin/`.
 2. Open **`/portal/`**, sign in with **DAV** credentials.
 3. **My Calendars:** create/edit calendars, holidays, share, import/export `.ics`.
-4. **My Contacts:** select address book, import/export `.vcf`.
+4. **My Contacts:** address books, contact search/CRUD, photos, custom fields, import/export `.vcf`.
 
 ![User portal — My Calendars](docs/images/portal-my-calendars.jpg)
 
-![User portal — My Contacts](docs/images/portal-my-contacts.png)
+![User portal — My Contacts](docs/images/portal-my-contacts.jpg)
 
 More detail: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#user-portal).  
 `/dav.php/` remains available as the original sabre browser (and for all CalDAV/CardDAV clients).
@@ -104,6 +105,15 @@ calendar-timezone fix) are applied automatically via
 
 Changelog (fork)
 ----------------
+
+### 0.11.1-fork.3
+
+- Portal **My Contacts**: address book create/rename/delete; contact list (table), search, create/edit/delete
+- Multi email/phone, structured address, photos (vCard 3.0 JPEG), Unicode custom fields (`X-BAIKAL-CUSTOM`)
+- **ReadOnlyPlugin**: portal read-only calendars enforced on CalDAV (`PUT`/`DELETE`/… → 403)
+- Portal security: login rate limit, session idle timeout, CSRF + same-origin, import quotas, UTF-8-safe API JSON
+- Docker: `php8.2-gd`, CSP headers; production portal builds without source maps
+- Docs: updated contacts screenshot and deployment notes
 
 ### 0.11.1-fork.2
 

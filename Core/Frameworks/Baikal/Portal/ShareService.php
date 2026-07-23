@@ -14,6 +14,9 @@ use Sabre\VObject\Reader;
  * Calendar listing and sharing via sabre/dav CalDAV backend.
  */
 class ShareService {
+    /** Soft cap on VEVENT/VTODO/VJOURNAL components per import request */
+    private const MAX_IMPORT_COMPONENTS = 10000;
+
     /** @var \PDO */
     private $pdo;
 
@@ -373,6 +376,12 @@ class ShareService {
         if ($toImport === []) {
             throw new ApiException('No VEVENT, VTODO, or VJOURNAL components found in ICS', 400);
         }
+        if (count($toImport) > self::MAX_IMPORT_COMPONENTS) {
+            throw new ApiException(
+                'Too many components in import (max ' . self::MAX_IMPORT_COMPONENTS . '). Split the .ics file.',
+                400
+            );
+        }
 
         // Preload existing object URIs for this calendar (one query vs N)
         $existingUris = $this->listExistingObjectUris($calId);
@@ -587,7 +596,7 @@ class ShareService {
             $out[] = [
                 'username'    => $username,
                 'displayname' => (string) ($row['displayname'] ?: $username),
-                'email'       => (string) ($row['email'] ?? ''),
+                // Email omitted from directory for privacy (username is enough to share)
             ];
         }
 

@@ -3,6 +3,7 @@ export type PortalUser = {
   displayname: string;
   email: string;
   principal: string;
+  csrfToken?: string;
 };
 
 export type Calendar = {
@@ -46,7 +47,7 @@ export type Share = {
 export type DirectoryUser = {
   username: string;
   displayname: string;
-  email: string;
+  email?: string;
 };
 
 export type AddressBook = {
@@ -57,12 +58,89 @@ export type AddressBook = {
   cardCount: number;
 };
 
+export type ContactPhone = {
+  type: "cell" | "work" | "home" | "other" | string;
+  value: string;
+};
+
+export type ContactAddress = {
+  street: string;
+  city: string;
+  region: string;
+  postal: string;
+  country: string;
+};
+
+/** vCard X-* extension properties (custom fields) */
+export type ContactCustomField = {
+  name?: string;
+  label: string;
+  value: string;
+};
+
+export type ContactSummary = {
+  uri: string;
+  displayname: string;
+  firstname: string;
+  lastname: string;
+  org: string;
+  email: string;
+  phone: string;
+  hasPhoto: boolean;
+  etag?: string;
+};
+
+export type ContactDetail = {
+  uri: string;
+  displayname: string;
+  firstname: string;
+  lastname: string;
+  fullname: string;
+  org: string;
+  title: string;
+  emails: string[];
+  phones: ContactPhone[];
+  address: ContactAddress;
+  url: string;
+  note: string;
+  custom: ContactCustomField[];
+  hasPhoto: boolean;
+  photoDataUri?: string | null;
+};
+
+export type ContactWriteBody = {
+  firstname?: string;
+  lastname?: string;
+  fullname?: string;
+  org?: string;
+  title?: string;
+  emails?: string[];
+  phones?: ContactPhone[];
+  address?: ContactAddress;
+  url?: string;
+  note?: string;
+  custom?: ContactCustomField[];
+  photoBase64?: string | null;
+  removePhoto?: boolean;
+};
+
 class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
     this.status = status;
   }
+}
+
+/** Session CSRF token (set from login /me responses) */
+let csrfToken = "";
+
+export function setCsrfToken(token: string | null | undefined): void {
+  csrfToken = token && typeof token === "string" ? token : "";
+}
+
+export function getCsrfToken(): string {
+  return csrfToken;
 }
 
 async function request<T>(
@@ -72,6 +150,10 @@ async function request<T>(
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  const method = (init.method || "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS" && csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
   }
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -106,17 +188,36 @@ async function request<T>(
   return data as T;
 }
 
+function encUri(uri: string): string {
+  return encodeURIComponent(uri);
+}
+
 export const api = {
-  me: () =>
-    request<{ user: PortalUser; version: string | null; davPath: string }>(
-      "/me",
-    ),
-  login: (username: string, password: string) =>
-    request<{ user: PortalUser }>("/login", {
+  me: async () => {
+    const data = await request<{
+      user: PortalUser;
+      csrfToken?: string;
+      version: string | null;
+      davPath: string;
+    }>("/me");
+    setCsrfToken(data.csrfToken || data.user?.csrfToken);
+    return data;
+  },
+  login: async (username: string, password: string) => {
+    const data = await request<{ user: PortalUser }>("/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
-    }),
-  logout: () => request<{ ok: boolean }>("/logout", { method: "POST" }),
+    });
+    setCsrfToken(data.user?.csrfToken);
+    return data;
+  },
+  logout: async () => {
+    try {
+      return await request<{ ok: boolean }>("/logout", { method: "POST" });
+    } finally {
+      setCsrfToken("");
+    }
+  },
   calendars: () => request<{ calendars: Calendar[] }>("/calendars"),
   createCalendar: (body: {
     displayname: string;
@@ -184,6 +285,28 @@ export const api = {
 
   addressbooks: () =>
     request<{ addressbooks: AddressBook[] }>("/addressbooks"),
+  createAddressBook: (body: {
+    displayname: string;
+    description?: string;
+    uri?: string;
+  }) =>
+    request<{ addressbook: AddressBook }>("/addressbooks", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateAddressBook: (
+    id: number,
+    body: { displayname?: string; description?: string },
+  ) =>
+    request<{ addressbook: AddressBook }>(`/addressbooks/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteAddressBook: (id: number, force = false) =>
+    request<{ ok: boolean }>(`/addressbooks/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ force }),
+    }),
   exportAddressBook: async (
     id: number,
   ): Promise<{ blob: Blob; filename: string }> => {
@@ -211,6 +334,37 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ vcf }),
     }),
+
+  contacts: (abId: number, q = "") => {
+    const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+    return request<{ contacts: ContactSummary[] }>(
+      `/addressbooks/${abId}/contacts${qs}`,
+    );
+  },
+  getContact: (abId: number, uri: string) =>
+    request<{ contact: ContactDetail }>(
+      `/addressbooks/${abId}/contacts/${encUri(uri)}`,
+    ),
+  createContact: (abId: number, body: ContactWriteBody) =>
+    request<{ contact: ContactDetail }>(`/addressbooks/${abId}/contacts`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateContact: (abId: number, uri: string, body: ContactWriteBody) =>
+    request<{ contact: ContactDetail }>(
+      `/addressbooks/${abId}/contacts/${encUri(uri)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteContact: (abId: number, uri: string) =>
+    request<{ ok: boolean }>(
+      `/addressbooks/${abId}/contacts/${encUri(uri)}`,
+      { method: "DELETE" },
+    ),
+  contactPhotoUrl: (abId: number, uri: string): string =>
+    `/api/addressbooks/${abId}/contacts/${encUri(uri)}/photo`,
 };
 
 export { ApiError };

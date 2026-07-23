@@ -172,6 +172,8 @@ class Server {
             $this->server->addPlugin(new \Sabre\CalDAV\Schedule\Plugin());
             $this->server->addPlugin(new \Sabre\DAV\Sharing\Plugin());
             $this->server->addPlugin(new \Sabre\CalDAV\SharingPlugin());
+            // Enforce portal "read-only" on CalDAV clients (PUT/DELETE/…), not only in /api/.
+            $this->server->addPlugin(new \Baikal\Core\Plugins\ReadOnlyPlugin($this->pdo));
             if (isset($config['system']["invite_from"]) && $config['system']["invite_from"] !== "") {
                 $this->server->addPlugin(new \Sabre\CalDAV\Schedule\IMipPlugin($config['system']["invite_from"]));
             }
