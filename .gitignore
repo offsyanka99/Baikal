@@ -1,6 +1,9 @@
 # logs
 logs
 
+# Local docker run data (see docs/truenas-scale.compose.yaml)
+.local-run/
+
 # Specific
 config/baikal.yaml
 config/.htaccess
