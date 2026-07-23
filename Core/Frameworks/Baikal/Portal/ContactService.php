@@ -274,10 +274,7 @@ class ContactService {
             throw new ApiException('No vCard entries found (expected BEGIN:VCARD … END:VCARD)', 400);
         }
         if (count($cards) > self::MAX_IMPORT_CARDS) {
-            throw new ApiException(
-                'Too many contacts in import (max ' . self::MAX_IMPORT_CARDS . '). Split the .vcf file.',
-                400
-            );
+            throw new ApiException('Too many contacts in import (max ' . self::MAX_IMPORT_CARDS . '). Split the .vcf file.', 400);
         }
 
         $existing = $this->listExistingCardUris($addressBookId);
@@ -1064,20 +1061,14 @@ class ContactService {
                     throw new ApiException('Custom field label is required when a value is set', 400);
                 }
                 if (mb_strlen($label) > self::MAX_CUSTOM_LABEL_LEN) {
-                    throw new ApiException(
-                        'Custom field label is too long (max ' . self::MAX_CUSTOM_LABEL_LEN . ' characters)',
-                        400
-                    );
+                    throw new ApiException('Custom field label is too long (max ' . self::MAX_CUSTOM_LABEL_LEN . ' characters)', 400);
                 }
                 if ($value === '') {
                     // Empty value = omit (clear) this field
                     continue;
                 }
                 if (mb_strlen($value) > self::MAX_CUSTOM_VALUE_LEN) {
-                    throw new ApiException(
-                        'Custom field value is too long (max ' . self::MAX_CUSTOM_VALUE_LEN . ' characters)',
-                        400
-                    );
+                    throw new ApiException('Custom field value is too long (max ' . self::MAX_CUSTOM_VALUE_LEN . ' characters)', 400);
                 }
                 // Always use X-BAIKAL-CUSTOM + JSON so labels can be any Unicode (Cyrillic, etc.)
                 // Classic vCard property names are ASCII-only (X-SPOUSE), which breaks non-Latin labels.
@@ -1123,7 +1114,7 @@ class ContactService {
                 'url'        => array_key_exists('url', $fields),
                 'note'       => array_key_exists('note', $fields),
                 'birthday'   => array_key_exists('birthday', $fields),
-                'specialDate'=> array_key_exists('specialDate', $fields)
+                'specialDate' => array_key_exists('specialDate', $fields)
                     || array_key_exists('specialDateLabel', $fields),
                 'custom'     => array_key_exists('custom', $fields),
             ],
@@ -1243,6 +1234,7 @@ class ContactService {
         if ($name === '') {
             return 'Custom';
         }
+
         // Title-case words for display
         return ucwords(strtolower($name));
     }
@@ -1671,6 +1663,7 @@ class ContactService {
         if (strlen($binary) < 4) {
             return false;
         }
+
         // JPEG / PNG / GIF
         return strncmp($binary, "\xFF\xD8\xFF", 3) === 0
             || strncmp($binary, "\x89PNG", 4) === 0

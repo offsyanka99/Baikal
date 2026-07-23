@@ -925,7 +925,6 @@ class ShareService {
                 }
             }
         }
-
     }
 
     private function normalizeObjectUri(string $uri): string {
@@ -1107,10 +1106,7 @@ class ShareService {
             throw new ApiException('No VEVENT, VTODO, or VJOURNAL components found in ICS', 400);
         }
         if (count($toImport) > self::MAX_IMPORT_COMPONENTS) {
-            throw new ApiException(
-                'Too many components in import (max ' . self::MAX_IMPORT_COMPONENTS . '). Split the .ics file.',
-                400
-            );
+            throw new ApiException('Too many components in import (max ' . self::MAX_IMPORT_COMPONENTS . '). Split the .ics file.', 400);
         }
 
         // Preload existing object URIs for this calendar (one query vs N)

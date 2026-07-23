@@ -2,7 +2,7 @@
 
 /**
  * Unit checks for CalendarItemService VTODO/VJOURNAL parse helpers via create/list on SQLite.
- * Run: php tests/php/CalendarItemServiceTest.php
+ * Run: php tests/php/CalendarItemServiceTest.php.
  */
 
 declare(strict_types=1);
@@ -17,6 +17,7 @@ function assert_true(bool $cond, string $msg): void {
     global $failures;
     if ($cond) {
         echo "OK  $msg\n";
+
         return;
     }
     echo "FAIL $msg\n";

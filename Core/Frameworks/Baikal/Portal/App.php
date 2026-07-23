@@ -24,7 +24,7 @@ class App {
     private $config;
 
     /** @var array<string, mixed>|null Cached JSON body (php://input is one-shot) */
-    private $jsonBodyCache = null;
+    private $jsonBodyCache;
 
     public function __construct(\PDO $pdo, array $config) {
         $this->config = $config;
@@ -45,7 +45,7 @@ class App {
     /**
      * Portal UI prefs (time format / week start). Env overrides YAML.
      * TIME_FORMAT / BAIKAL_PORTAL_TIME_FORMAT: auto|12h|24h
-     * BAIKAL_PORTAL_WEEK_START: auto|monday|sunday
+     * BAIKAL_PORTAL_WEEK_START: auto|monday|sunday.
      *
      * @return array{timeFormat: string, weekStart: string}
      */
