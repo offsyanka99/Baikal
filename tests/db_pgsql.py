@@ -1,5 +1,5 @@
 import mechanicalsoup, os, psycopg2
-from test_helpers import assert_installed, assert_dashboard, assert_upgrade, setup_admin_password
+from test_helpers import assert_upgrade, install_pgsql
 
 def setup():
     conn = psycopg2.connect(
@@ -14,27 +14,6 @@ def setup():
     cursor.execute("CREATE DATABASE baikal_test")
     cursor.close()
     conn.close()
-
-def install_pgsql(browser: mechanicalsoup.StatefulBrowser):
-    setup_admin_password(browser)
-
-    page = browser.get_current_page()
-    assert "baïkal database setup" in page.text.lower()
-    browser.select_form("form")
-    browser["data[backend]"] = "pgsql"
-    browser.submit_selected()
-
-    page = browser.get_current_page()
-    assert "postgresql host" in page.text.lower()
-    browser.select_form("form")
-    browser["data[pgsql_host]"] = "127.0.0.1"
-    browser["data[pgsql_dbname]"] = "baikal_test"
-    browser["data[pgsql_username]"] = "baikal"
-    browser["data[pgsql_password]"] = "baikal"
-    browser.submit_selected()
-
-    assert_installed(browser)
-    assert_dashboard(browser)
 
 def test_install(browser: mechanicalsoup.StatefulBrowser):
     install_pgsql(browser)
