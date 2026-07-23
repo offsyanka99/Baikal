@@ -16,10 +16,17 @@
 #
 # After deploy:
 # 1. Open http://NAS-IP:31088  → complete installer (admin password; SQLite OK)
-# 2. Admin: http://NAS-IP:31088/admin/
-# 3. DAV:   http://NAS-IP:31088/dav.php/
-# 4. Health: http://NAS-IP:31088/health.php
-# 5. Info:   http://NAS-IP:31088/info.php
+# 2. Admin:  http://NAS-IP:31088/admin/
+# 3. Portal: http://NAS-IP:31088/portal/   ← user login, share calendars
+# 4. DAV:    http://NAS-IP:31088/dav.php/  ← clients + classic browser
+# 5. Health: http://NAS-IP:31088/health.php
+# 6. Info:   http://NAS-IP:31088/info.php
+#
+# Share calendars (user-friendly):
+#   1. Admin creates user1 + user2 under /admin/
+#   2. user1 opens /portal/ , signs in with DAV password
+#   3. Select calendar → pick user2 → Read only or Full access → Share
+#   Classic backup UI: /dav.php/ → calendar → Actions → mailto:…
 #
 # Home Assistant CalDAV:
 #   URL:  http://NAS-IP:31088/dav.php/  (prefer HTTPS via reverse proxy)

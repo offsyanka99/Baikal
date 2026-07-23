@@ -17,3 +17,5 @@ README.md
 run_tests.py
 phpstan.neon
 .php-cs-fixer.dist.php
+portal/node_modules
+.local-run

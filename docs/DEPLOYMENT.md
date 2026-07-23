@@ -32,12 +32,37 @@ See [`truenas-scale.compose.yaml`](truenas-scale.compose.yaml).
 
 | Path | Purpose |
 |------|---------|
+| `/portal/` | **User portal** (share calendars; DAV user login) |
+| `/api/` | Portal JSON API (session cookie; same origin as SPA) |
 | `/health.php` | Liveness JSON (`status`, `version`, install lock) |
 | `/info.php` | Public feature flags (no secrets) |
-| `/dav.php/` | Combined CalDAV + CardDAV |
+| `/dav.php/` | Combined CalDAV + CardDAV + classic browser UI |
 | `/cal.php/` | CalDAV only |
 | `/card.php/` | CardDAV only |
 | `/admin/` | Web admin |
+
+## User portal (calendar sharing)
+
+Modern UI (TypeScript SPA, dark theme aligned with [bookmarks-sync](https://github.com/) admin style) for **end users**:
+
+| Step | Action |
+|------|--------|
+| 1 | Open `http://NAS-IP:31088/portal/` |
+| 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
+| 3 | Select a calendar you own |
+| 4 | Choose another Baikal user + **Read only** or **Full access** → Share |
+| 5 | Revoke from the share list when needed |
+
+- Backend: PHP API under `/api/` using sabre/dav sharing (`calendarinstances`).
+- Frontend source: [`portal/`](../portal/) (Vite + TypeScript); image build compiles into `html/portal/`.
+- **`/dav.php/` is unchanged** — still the protocol endpoint and classic share UI backup.
+
+Local SPA rebuild after UI edits:
+
+```bash
+cd portal && npm install && npm run build
+# outputs to html/portal/
+```
 
 ## Home Assistant / calendar-timezone
 

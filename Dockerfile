@@ -25,7 +25,19 @@ RUN composer install --no-interaction --no-dev --prefer-dist --optimize-autoload
     && rm -f composer.json composer.lock
 
 # ---------------------------------------------------------------------------
-# Stage 2: nginx + PHP-FPM runtime
+# Stage 2: TypeScript user portal SPA → /html/portal
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS portal
+
+WORKDIR /build/portal
+COPY portal/package.json portal/package-lock.json* ./
+RUN npm install
+COPY portal/ ./
+# vite.config outDir is ../html/portal → /build/html/portal
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 3: nginx + PHP-FPM runtime
 # ---------------------------------------------------------------------------
 FROM nginx:1
 
@@ -57,6 +69,8 @@ RUN curl -fsSL -o /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/a
     && sed -i 's/;clear_env = no/clear_env = no/' /etc/php/8.2/fpm/pool.d/www.conf
 
 COPY --from=builder --chown=nginx:nginx /src /var/www/baikal
+COPY --from=portal --chown=nginx:nginx /build/html/portal /var/www/baikal/html/portal
+
 RUN mkdir -p /var/www/baikal/config /var/www/baikal/Specific/db \
     && chown -R nginx:nginx /var/www/baikal
 

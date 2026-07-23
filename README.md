@@ -12,6 +12,7 @@ Fork of the [Baïkal](https://sabre.io/baikal/) CalDAV + CardDAV server with:
 - System settings for **Tasks (VTODO)** and **Notes (VJOURNAL)**
 - `/health.php` and `/info.php` for monitoring
 - CalDAV **calendar-timezone** dual-format fix (plain Olson id + VTIMEZONE) for Home Assistant expand queries
+- **User portal** (`/portal/`) — TypeScript SPA + PHP API to share calendars (bookmarks-sync style UI); `/dav.php/` kept as classic backup
 
 Upstream project: [sabre-io/Baikal](https://github.com/sabre-io/Baikal).  
 Official docs: [sabre.io/baikal](https://sabre.io/baikal/).
@@ -40,10 +41,21 @@ Endpoints
 
 | Path | Use |
 |------|-----|
-| `/dav.php/` | CalDAV + CardDAV |
+| `/portal/` | **User portal** — sign in as a DAV user, share calendars |
+| `/dav.php/` | CalDAV + CardDAV (clients + classic WebDAV browser) |
 | `/admin/` | Web admin |
+| `/api/` | Portal JSON API (session cookie) |
 | `/health.php` | Liveness JSON |
 | `/info.php` | Public status JSON |
+
+User portal (calendar sharing)
+------------------------------
+
+1. Admin creates DAV users under `/admin/`.
+2. Each user opens **`/portal/`**, signs in with **DAV** credentials.
+3. Select a calendar → pick another user → **Read only** or **Full access** → Share / Revoke.
+
+`/dav.php/` remains available as the original sabre browser (and for all CalDAV clients).
 
 Home Assistant
 --------------
