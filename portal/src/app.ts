@@ -85,7 +85,8 @@ const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
   "shared-with-me": {
     title: "Shared with me",
     paragraphs: [
-      "Calendars other users shared with you. You can export a copy; name, color, and sharing are managed by the owner.",
+      "Calendars other users shared with you. Select one to view events in the month grid.",
+      "Read-only shares allow viewing only. Full access also lets you create and edit events (owner still manages name, color, and sharing).",
     ],
   },
   "calendar-details": {
@@ -671,7 +672,9 @@ export function mountApp(root: HTMLElement): void {
 
     const emptyHint =
       !selected
-        ? `<p class="muted small month-empty-hint">No calendars yet — create one on the left. The grid stays empty until events exist.</p>`
+        ? calendars.length === 0
+          ? `<p class="muted small month-empty-hint">No calendars yet — create one on the left, or wait for someone to share with you.</p>`
+          : `<p class="muted small month-empty-hint">Select a calendar on the left (owned or shared) to view events.</p>`
         : monthEventsLoading
           ? `<p class="muted small month-empty-hint">Loading events…</p>`
           : "";
@@ -1874,16 +1877,24 @@ export function mountApp(root: HTMLElement): void {
       .join("");
 
     const sharedRows = sharedWithMe
-      .map(
-        (c) => `<div class="cal-row cal-row-static">
-          <span class="cal-swatch cal-swatch-empty"></span>
+      .map((c) => {
+        const active = c.id === selectedId ? " is-selected" : "";
+        const color = c.color
+          ? `<span class="cal-swatch" style="background:${esc(c.color)}"></span>`
+          : `<span class="cal-swatch cal-swatch-empty"></span>`;
+        const accessHint =
+          c.access === "readwrite"
+            ? "Shared with you · full access — select to view and edit events"
+            : "Shared with you · read-only — select to view events";
+        return `<div class="cal-row${active}" data-action="select-cal" data-id="${c.id}" role="button" tabindex="0" title="${esc(accessHint)}">
+          ${color}
           <span class="cal-row-text">
             <span class="cal-row-title">${esc(c.displayname)}</span>
             <span class="cal-row-badges">${accessBadge(c.access)}</span>
-            <span class="muted small">Shared with you · ${esc(c.access)}</span>
+            <span class="muted small">${c.access === "readwrite" ? "Shared · full access" : "Shared · read-only"}</span>
           </span>
-        </div>`,
-      )
+        </div>`;
+      })
       .join("");
 
     const userOptions = directory
