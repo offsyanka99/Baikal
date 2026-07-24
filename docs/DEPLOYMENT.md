@@ -113,8 +113,8 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 - Portal debug logging (`off` by default; enable while troubleshooting):
   - `system.portal_log_level` or `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL`: `off` | `error` | `warn` | `info` | `debug`
   - **Browser:** open DevTools → Console; messages are prefixed `[baikal-portal]`
-  - **Server:** `info`/`debug` → `Specific/portal_debug.log`; `warn`/`error` → PHP/`docker logs`
-  - Nginx may still show older images’ info lines as `[error]` (FastCGI stderr); HTTP status is what matters (200/401)
+  - **Server:** all portal request tracing → `Specific/portal_debug.log` (never nginx `[error]`)
+  - If docker logs show `FastCGI sent in stderr: "PHP message: Baikal portal: …"` you are on an **old image** (or did not re-pull `latest`). Force recreate after pull.
   - Public `GET /api/ui` returns prefs (including log level) without a session
 
 ### API (summary)

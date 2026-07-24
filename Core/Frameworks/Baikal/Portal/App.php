@@ -103,22 +103,15 @@ class App {
     }
 
     /**
-     * Server-side portal log.
-     * warn/error → PHP error_log (visible in container/nginx).
-     * info/debug → Specific/portal_debug.log (does not flood nginx as [error]).
+     * Server-side portal request log → Specific/portal_debug.log only.
+     *
+     * Never use PHP error_log() here: php-fpm writes that to stderr and nginx
+     * logs every line as [error], even for successful 200 responses.
      */
     private function portalServerLog(string $message, string $min = 'info'): void {
         if (!$this->portalServerLogEnabled($min)) {
             return;
         }
-        $line = 'Baikal portal: ' . $message;
-        // Real problems: stderr / container log
-        if ($min === 'error' || $min === 'warn') {
-            error_log($line);
-
-            return;
-        }
-        // Request tracing: file under Specific/ (nginx treats FPM stderr as [error])
         $dir = defined('PROJECT_PATH_SPECIFIC')
             ? PROJECT_PATH_SPECIFIC
             : (defined('PROJECT_PATH_ROOT') ? PROJECT_PATH_ROOT . 'Specific/' : '');
@@ -127,7 +120,12 @@ class App {
         }
         $path = rtrim($dir, '/') . '/portal_debug.log';
         $ts = date('Y-m-d H:i:s');
-        @file_put_contents($path, '[' . $ts . '] ' . $line . "\n", FILE_APPEND | LOCK_EX);
+        $level = strtoupper($min);
+        @file_put_contents(
+            $path,
+            '[' . $ts . '] [' . $level . '] Baikal portal: ' . $message . "\n",
+            FILE_APPEND | LOCK_EX
+        );
     }
 
     /**
@@ -233,6 +231,13 @@ class App {
                 'info'
             );
         } catch (ApiException $e) {
+            // 401 before login is normal; keep it at info so debug stays calm
+            $lvl = 'info';
+            if ($e->getStatus() >= 500) {
+                $lvl = 'error';
+            } elseif ($e->getStatus() >= 400 && $e->getStatus() !== 401) {
+                $lvl = 'warn';
+            }
             $this->portalServerLog(
                 sprintf(
                     '%s %s → %d %s (%dms)',
@@ -242,11 +247,15 @@ class App {
                     $e->getMessage(),
                     (int) ((microtime(true) - $t0) * 1000)
                 ),
-                $e->getStatus() >= 500 ? 'error' : 'warn'
+                $lvl
             );
             $this->json($e->getStatus(), ['error' => $e->getMessage()]);
         } catch (\Throwable $e) {
             error_log('Baikal portal API: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+            $this->portalServerLog(
+                sprintf('%s %s → 500 %s', $method, $path, $e->getMessage()),
+                'error'
+            );
             $msg = 'Internal server error';
             // Surface timeout clearly for large imports (Thunderbird full calendar/contacts)
             if (stripos($e->getMessage(), 'Maximum execution time') !== false) {
