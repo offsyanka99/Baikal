@@ -752,7 +752,7 @@ class App {
      * Stream NDJSON progress for long imports (each line is one JSON object).
      * progress → {type,current,total,percent,imported,updated,skipped}
      * done     → {type,result:{imported,updated,skipped}}
-     * error    → {type,error,status}
+     * error    → {type,error,status}.
      *
      * @param callable(?callable): array{imported: int, updated: int, skipped: int} $importFn
      */
@@ -774,10 +774,6 @@ class App {
         header('Cache-Control: no-store');
         header('X-Content-Type-Options: nosniff');
         header('X-Accel-Buffering: no'); // nginx: disable proxy buffering
-        // Force headers out before the long parse/write loop (avoids 504 "reading response header")
-        if (function_exists('header_remove')) {
-            // no-op guard
-        }
 
         $emit = static function (array $payload): void {
             $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
