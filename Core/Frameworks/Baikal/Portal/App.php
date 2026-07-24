@@ -260,6 +260,10 @@ class App {
                 ),
                 $lvl
             );
+            // NDJSON stream may already have flushed headers/body
+            if ($this->responseSent) {
+                return;
+            }
             $this->json($e->getStatus(), ['error' => $e->getMessage()]);
         } catch (\Throwable $e) {
             error_log('Baikal portal API: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
@@ -267,6 +271,9 @@ class App {
                 sprintf('%s %s → 500 %s', $method, $path, $e->getMessage()),
                 'error'
             );
+            if ($this->responseSent) {
+                return;
+            }
             $msg = 'Internal server error';
             // Surface timeout clearly for large imports (Thunderbird full calendar/contacts)
             if (stripos($e->getMessage(), 'Maximum execution time') !== false) {
@@ -415,10 +422,19 @@ class App {
             }
         }
 
-        // POST /calendars/{id}/import — ICS body (JSON {ics} or raw text/calendar)
+        // POST /calendars/{id}/import — ICS body (raw text/calendar preferred; JSON {ics} still works)
         // Accept: application/x-ndjson → stream progress lines for the portal modal
         if ($method === 'POST' && preg_match('#^/calendars/(\d+)/import$#', $path, $m)) {
             $instanceId = (int) $m[1];
+            // Raise limits before reading multi‑MB bodies into memory
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(600);
+            }
+            @ini_set('memory_limit', '512M');
+            // Release session lock so other portal tabs / healthchecks keep working
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
             $ics = $this->readIcsPayload();
             if ($this->wantsImportProgressStream()) {
                 $this->streamImportProgress(function (?callable $onProgress) use ($username, $instanceId, $ics) {
@@ -487,6 +503,13 @@ class App {
 
         if ($method === 'POST' && preg_match('#^/addressbooks/(\d+)/import$#', $path, $m)) {
             $id = (int) $m[1];
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(600);
+            }
+            @ini_set('memory_limit', '512M');
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
             $vcf = $this->readPayloadField('vcf', ['text/vcard', 'text/x-vcard', 'text/directory']);
             if ($this->wantsImportProgressStream()) {
                 $this->streamImportProgress(function (?callable $onProgress) use ($username, $id, $vcf) {
@@ -652,14 +675,35 @@ class App {
         }
     }
 
+    /** @var string|null Raw php://input (one-shot stream — cache for reuse) */
+    private $rawBodyCache;
+
+    private function rawRequestBody(): string {
+        if ($this->rawBodyCache !== null) {
+            return $this->rawBodyCache;
+        }
+        $raw = file_get_contents('php://input');
+        $this->rawBodyCache = $raw === false ? '' : $raw;
+
+        return $this->rawBodyCache;
+    }
+
     /**
      * @param list<string> $rawContentTypes
      */
     private function readPayloadField(string $jsonField, array $rawContentTypes): string {
         $ct = strtolower((string) ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? ''));
-        $raw = file_get_contents('php://input');
-        if ($raw === false) {
-            $raw = '';
+        $raw = $this->rawRequestBody();
+
+        // Prefer raw calendar/vcard bodies (portal import) — avoid JSON round-trip
+        foreach ($rawContentTypes as $t) {
+            if (str_contains($ct, $t)) {
+                if (trim($raw) === '') {
+                    throw new ApiException('Request body is empty', 400);
+                }
+
+                return $raw;
+            }
         }
 
         $isJson = str_contains($ct, 'application/json')
@@ -667,21 +711,19 @@ class App {
         if ($isJson) {
             $data = json_decode($raw, true);
             if (!is_array($data)) {
-                throw new ApiException('Invalid JSON body', 400);
+                throw new ApiException('Invalid JSON body (import prefers raw text/calendar or text/vcard)', 400);
             }
-            if (!empty($data[$jsonField]) && is_string($data[$jsonField])) {
+            if (isset($data[$jsonField]) && is_string($data[$jsonField]) && $data[$jsonField] !== '') {
                 return $data[$jsonField];
             }
             throw new ApiException('JSON body must include string field "' . $jsonField . '"', 400);
         }
 
-        foreach ($rawContentTypes as $t) {
-            if (str_contains($ct, $t)) {
-                return $raw;
-            }
+        // Allow plain text uploads
+        if (trim($raw) === '') {
+            throw new ApiException('Request body is empty', 400);
         }
 
-        // Allow plain text uploads
         return $raw;
     }
 
@@ -692,8 +734,8 @@ class App {
         if ($this->jsonBodyCache !== null) {
             return $this->jsonBodyCache;
         }
-        $raw = file_get_contents('php://input');
-        if ($raw === false || trim($raw) === '') {
+        $raw = $this->rawRequestBody();
+        if (trim($raw) === '') {
             $this->jsonBodyCache = [];
 
             return [];

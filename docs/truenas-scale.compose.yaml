@@ -81,10 +81,11 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          # 1G recommended for large .ics/.vcf imports (512M often OOMs mid-parse)
+          memory: 1G
         reservations:
           cpus: "0.10"
-          memory: 64M
+          memory: 128M
 
     ports:
       - "31088:80"

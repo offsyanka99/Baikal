@@ -350,32 +350,47 @@ function encUri(uri: string): string {
 /**
  * Long calendar/contact imports stream NDJSON progress lines when
  * Accept: application/x-ndjson is sent (portal import modal).
+ *
+ * Body is sent as raw text/calendar or text/vcard (not JSON) so large
+ * Thunderbird exports with non-UTF-8 bytes do not fail JSON encoding.
  */
 async function streamImport<T extends ImportResult>(
   path: string,
-  body: Record<string, string>,
+  rawBody: string,
+  contentType: string,
   onProgress?: (p: ImportProgressEvent) => void,
 ): Promise<T> {
   const headers = new Headers({
-    "Content-Type": "application/json",
-    Accept: "application/x-ndjson",
+    "Content-Type": contentType,
+    Accept: "application/x-ndjson, application/json;q=0.9",
   });
   if (csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
   const t0 =
     typeof performance !== "undefined" ? performance.now() : Date.now();
-  log.debug(`api → POST ${path} (stream)`);
-  const res = await fetch(`/api${path}`, {
-    method: "POST",
-    headers,
-    credentials: "same-origin",
-    body: JSON.stringify(body),
-  });
+  log.debug(`api → POST ${path} (stream, ${contentType}, ${rawBody.length} bytes)`);
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      method: "POST",
+      headers,
+      credentials: "same-origin",
+      body: rawBody,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Network error";
+    log.error(`api ← POST ${path} network fail`, msg);
+    throw new ApiError(
+      `Import request failed to start (${msg}). Check connectivity and container logs.`,
+      0,
+    );
+  }
 
   // Non-stream error (auth/CSRF before body) — may still be JSON
   const ct = (res.headers.get("Content-Type") || "").toLowerCase();
-  if (!res.ok && !ct.includes("ndjson") && !ct.includes("x-ndjson")) {
+  const isNdjson = ct.includes("ndjson") || ct.includes("x-ndjson");
+  if (!res.ok && !isNdjson) {
     let msg = `Request failed (${res.status})`;
     try {
       const data = (await res.json()) as { error?: string };
@@ -383,8 +398,33 @@ async function streamImport<T extends ImportResult>(
     } catch {
       /* ignore */
     }
+    if (res.status === 504 || res.status === 502) {
+      msg =
+        "Gateway timeout during import. Pull the latest image (nginx 900s timeout) and recreate the container. Large calendars can take several minutes.";
+    }
     log.warn(`api ← POST ${path} ${res.status}`, msg);
     throw new ApiError(msg, res.status);
+  }
+
+  // Server returned plain JSON (legacy / unexpected) — accept final result shape
+  if (!isNdjson && res.ok) {
+    try {
+      const data = (await res.json()) as T & { error?: string };
+      if (data && typeof data.error === "string") {
+        throw new ApiError(data.error, res.status || 500);
+      }
+      if (
+        data &&
+        typeof data.imported === "number" &&
+        typeof data.updated === "number"
+      ) {
+        log.info(`api ← POST ${path} json done`);
+        return data;
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+    }
+    throw new ApiError("Unexpected import response from server", 500);
   }
 
   if (!res.body) {
@@ -394,8 +434,58 @@ async function streamImport<T extends ImportResult>(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  let final: T | null = null;
-  let streamError: { message: string; status: number } | null = null;
+  const state: {
+    final: T | null;
+    error: { message: string; status: number } | null;
+    sawProgress: boolean;
+  } = { final: null, error: null, sawProgress: false };
+
+  const handleLine = (trimmed: string): void => {
+    let msg: {
+      type?: string;
+      percent?: number;
+      current?: number;
+      total?: number;
+      imported?: number;
+      updated?: number;
+      skipped?: number;
+      result?: T;
+      error?: string;
+      status?: number;
+    };
+    try {
+      msg = JSON.parse(trimmed) as typeof msg;
+    } catch {
+      log.debug("import stream non-JSON line", trimmed.slice(0, 80));
+      return;
+    }
+    if (msg.type === "progress") {
+      state.sawProgress = true;
+      const total = Number(msg.total) || 0;
+      const current = Number(msg.current) || 0;
+      const percent =
+        typeof msg.percent === "number"
+          ? msg.percent
+          : total > 0
+            ? Math.round((100 * current) / total)
+            : 0;
+      onProgress?.({
+        percent,
+        current,
+        total,
+        imported: Number(msg.imported) || 0,
+        updated: Number(msg.updated) || 0,
+        skipped: Number(msg.skipped) || 0,
+      });
+    } else if (msg.type === "done" && msg.result) {
+      state.final = msg.result;
+    } else if (msg.type === "error") {
+      state.error = {
+        message: msg.error || "Import failed",
+        status: msg.status || 500,
+      };
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -406,87 +496,36 @@ async function streamImport<T extends ImportResult>(
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      let msg: {
-        type?: string;
-        percent?: number;
-        current?: number;
-        total?: number;
-        imported?: number;
-        updated?: number;
-        skipped?: number;
-        result?: T;
-        error?: string;
-        status?: number;
-      };
-      try {
-        msg = JSON.parse(trimmed) as typeof msg;
-      } catch {
-        log.debug("import stream non-JSON line", trimmed.slice(0, 80));
-        continue;
-      }
-      if (msg.type === "progress") {
-        const total = Number(msg.total) || 0;
-        const current = Number(msg.current) || 0;
-        const percent =
-          typeof msg.percent === "number"
-            ? msg.percent
-            : total > 0
-              ? Math.round((100 * current) / total)
-              : 0;
-        onProgress?.({
-          percent,
-          current,
-          total,
-          imported: Number(msg.imported) || 0,
-          updated: Number(msg.updated) || 0,
-          skipped: Number(msg.skipped) || 0,
-        });
-      } else if (msg.type === "done" && msg.result) {
-        final = msg.result;
-      } else if (msg.type === "error") {
-        streamError = {
-          message: msg.error || "Import failed",
-          status: msg.status || 500,
-        };
-      }
+      handleLine(trimmed);
     }
   }
 
   // Trailing line without newline
   if (buf.trim()) {
-    try {
-      const msg = JSON.parse(buf.trim()) as {
-        type?: string;
-        result?: T;
-        error?: string;
-        status?: number;
-      };
-      if (msg.type === "done" && msg.result) final = msg.result;
-      if (msg.type === "error") {
-        streamError = {
-          message: msg.error || "Import failed",
-          status: msg.status || 500,
-        };
-      }
-    } catch {
-      /* ignore */
-    }
+    handleLine(buf.trim());
   }
 
   const ms = Math.round(
     (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
   );
 
-  if (streamError) {
-    log.warn(`api ← POST ${path} stream error (${ms}ms)`, streamError.message);
-    throw new ApiError(streamError.message, streamError.status);
+  if (state.error) {
+    log.warn(`api ← POST ${path} stream error (${ms}ms)`, state.error.message);
+    throw new ApiError(state.error.message, state.error.status);
   }
-  if (!final) {
-    log.error(`api ← POST ${path} stream incomplete (${ms}ms)`);
-    throw new ApiError("Import ended without a result", 500);
+  if (!state.final) {
+    log.error(`api ← POST ${path} stream incomplete (${ms}ms)`, {
+      sawProgress: state.sawProgress,
+    });
+    throw new ApiError(
+      state.sawProgress
+        ? "Import stopped before finishing (server crash, out of memory, or gateway timeout). On TrueNAS, set memory limit to at least 1G, pull latest image, and recreate the app."
+        : "Import failed to start on the server. Check container logs and that you are on the latest image.",
+      500,
+    );
   }
   log.info(`api ← POST ${path} stream done (${ms}ms)`);
-  return final;
+  return state.final;
 }
 
 export const api = {
@@ -595,7 +634,12 @@ export const api = {
     ics: string,
     onProgress?: (p: ImportProgressEvent) => void,
   ) =>
-    streamImport<ImportResult>(`/calendars/${instanceId}/import`, { ics }, onProgress),
+    streamImport<ImportResult>(
+      `/calendars/${instanceId}/import`,
+      ics,
+      "text/calendar; charset=utf-8",
+      onProgress,
+    ),
   directory: () => request<{ users: DirectoryUser[] }>("/directory"),
   shares: (instanceId: number) =>
     request<{ shares: Share[] }>(`/calendars/${instanceId}/shares`),
@@ -661,7 +705,12 @@ export const api = {
     vcf: string,
     onProgress?: (p: ImportProgressEvent) => void,
   ) =>
-    streamImport<ImportResult>(`/addressbooks/${id}/import`, { vcf }, onProgress),
+    streamImport<ImportResult>(
+      `/addressbooks/${id}/import`,
+      vcf,
+      "text/vcard; charset=utf-8",
+      onProgress,
+    ),
 
   contacts: (abId: number, q = "") => {
     const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
