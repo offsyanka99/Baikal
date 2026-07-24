@@ -1575,11 +1575,7 @@ export function mountApp(root: HTMLElement): void {
         ...importProgress,
         elapsedSec: Math.floor((Date.now() - importProgress.startedAt) / 1000),
       };
-      // Light update: only refresh the progress dialog if present
-      const el = root.querySelector<HTMLElement>("[data-import-elapsed]");
-      if (el) {
-        el.textContent = formatElapsed(importProgress.elapsedSec);
-      }
+      // Light update: refresh status line only (elapsed lives there while processing)
       const status = root.querySelector<HTMLElement>("[data-import-status-line]");
       if (status && importProgress.phase === "processing") {
         status.textContent = `Still working… ${formatElapsed(importProgress.elapsedSec)} (large files can take several minutes)`;
@@ -1676,8 +1672,7 @@ export function mountApp(root: HTMLElement): void {
           <div class="${barClass}"${barStyle}></div>
         </div>
         <p class="import-status-line" data-import-status-line>${esc(statusLine)}</p>
-        <p class="muted small">Elapsed: <strong data-import-elapsed>${esc(formatElapsed(p.elapsedSec))}</strong>
-          · Keep this tab open until the import finishes.</p>`;
+        <p class="muted small">Keep this tab open until the import finishes.</p>`;
     } else if (p.phase === "done") {
       body = `
         <div class="flash flash-success import-result" role="status" style="margin:0 0 1rem">
