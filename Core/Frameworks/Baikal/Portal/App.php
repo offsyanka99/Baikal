@@ -796,17 +796,20 @@ class App {
      * done     → {type,result:{imported,updated,skipped}}
      * error    → {type,error,status}.
      *
+     * Keep this minimal: only echo + flush. Do not call ob_flush() with no buffer
+     * (that aborts the import under error handlers that promote notices to exceptions).
+     *
      * @param callable(?callable): array{imported: int, updated: int, skipped: int} $importFn
      */
     private function streamImportProgress(callable $importFn): void {
         $this->responseSent = true;
 
-        // Disable output buffers so the browser sees progress lines early
+        // Drop any existing output buffers cleanly (no flush — may have no buffer left)
         while (ob_get_level() > 0) {
-            @ob_end_flush();
+            @ob_end_clean();
         }
-        @ini_set('output_buffering', 'off');
         @ini_set('zlib.output_compression', '0');
+        @ini_set('implicit_flush', '1');
         if (function_exists('apache_setenv')) {
             @apache_setenv('no-gzip', '1');
         }
@@ -815,33 +818,37 @@ class App {
         header('Content-Type: application/x-ndjson; charset=utf-8');
         header('Cache-Control: no-store');
         header('X-Content-Type-Options: nosniff');
-        header('X-Accel-Buffering: no'); // nginx: disable proxy buffering
+        header('X-Accel-Buffering: no');
 
         $emit = static function (array $payload): void {
             $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
             if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
                 $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
             }
-            echo json_encode($payload, $flags) . "\n";
-            if (function_exists('ob_flush')) {
+            $line = json_encode($payload, $flags);
+            if ($line === false) {
+                $line = '{"type":"error","error":"Progress encode failed","status":500}';
+            }
+            echo $line . "\n";
+            // Never call ob_flush() when level is 0 — that is the "Failed to flush buffer" crash
+            if (ob_get_level() > 0) {
                 @ob_flush();
             }
             flush();
         };
 
-        // Immediate first line so nginx/browser leave "waiting for headers" state
-        $emit([
-            'type'     => 'progress',
-            'current'  => 0,
-            'total'    => 0,
-            'percent'  => 0,
-            'imported' => 0,
-            'updated'  => 0,
-            'skipped'  => 0,
-            'phase'    => 'starting',
-        ]);
-
         try {
+            // First line immediately so nginx leaves "waiting for headers"
+            $emit([
+                'type'     => 'progress',
+                'current'  => 0,
+                'total'    => 0,
+                'percent'  => 0,
+                'imported' => 0,
+                'updated'  => 0,
+                'skipped'  => 0,
+            ]);
+
             $result = $importFn(static function (
                 int $current,
                 int $total,
@@ -879,6 +886,8 @@ class App {
             $msg = 'Internal server error';
             if (stripos($e->getMessage(), 'Maximum execution time') !== false) {
                 $msg = 'Import timed out. Try a smaller export, or import again (already-imported items update faster).';
+            } elseif (stripos($e->getMessage(), 'ob_flush') !== false) {
+                $msg = 'Import progress flush failed; please retry after updating the image.';
             }
             $emit([
                 'type'   => 'error',
