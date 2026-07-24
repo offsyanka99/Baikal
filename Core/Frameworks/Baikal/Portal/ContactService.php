@@ -20,6 +20,9 @@ class ContactService {
     private const PHOTO_MAX_EDGE = 256;
     /** Soft cap on cards imported in one request (DoS / memory) */
     private const MAX_IMPORT_CARDS = 5000;
+
+    /** Commit every N cards during import (same Phase 1 strategy as calendars). */
+    private const IMPORT_TX_CHUNK = 200;
     private const MAX_NOTE_LEN = 4000;
     private const MAX_NAME_LEN = 200;
     private const MAX_URL_LEN = 500;
@@ -293,63 +296,87 @@ class ContactService {
             $onProgress(0, $total, 0, 0, 0);
         }
 
-        foreach ($cards as $cardRaw) {
-            ++$n;
-            if (($n % 50) === 0 && function_exists('set_time_limit')) {
-                @set_time_limit(600);
-            }
+        $ownsTx = false;
+        try {
+            $ownsTx = $this->beginImportTransaction();
 
-            try {
-                $parsed = Reader::read($cardRaw, Reader::OPTION_FORGIVING);
-            } catch (\Throwable $e) {
-                error_log('portal contact parse: ' . $e->getMessage());
-                ++$skipped;
-                if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
-                    $onProgress($n, $total, $imported, $updated, $skipped);
+            foreach ($cards as $cardRaw) {
+                ++$n;
+                if (($n % 50) === 0 && function_exists('set_time_limit')) {
+                    @set_time_limit(600);
                 }
-                continue;
-            }
 
-            if ($parsed->name !== 'VCARD') {
+                try {
+                    $parsed = Reader::read($cardRaw, Reader::OPTION_FORGIVING);
+                } catch (\Throwable $e) {
+                    error_log('portal contact parse: ' . $e->getMessage());
+                    ++$skipped;
+                    if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                        $onProgress($n, $total, $imported, $updated, $skipped);
+                    }
+                    if ($ownsTx && $n < $total && ($n % self::IMPORT_TX_CHUNK) === 0) {
+                        $this->commitImportTransaction($ownsTx);
+                        $ownsTx = $this->beginImportTransaction();
+                    }
+                    continue;
+                }
+
+                if ($parsed->name !== 'VCARD') {
+                    $parsed->destroy();
+                    ++$skipped;
+                    if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                        $onProgress($n, $total, $imported, $updated, $skipped);
+                    }
+                    if ($ownsTx && $n < $total && ($n % self::IMPORT_TX_CHUNK) === 0) {
+                        $this->commitImportTransaction($ownsTx);
+                        $ownsTx = $this->beginImportTransaction();
+                    }
+                    continue;
+                }
+
+                $uid = isset($parsed->UID) ? (string) $parsed->UID : '';
+                if ($uid === '') {
+                    $uid = UUIDUtil::getUUID();
+                    $parsed->UID = $uid;
+                }
+
+                // True v3 document first, then re-encode PHOTO (no raw binary polyglots)
+                $parsed = $this->asVCard3($parsed);
+                $this->sanitizePhotoOnVCard($parsed);
+
+                $uri = $this->cardUriFromUid($uid);
+                $serialized = $parsed->serialize();
                 $parsed->destroy();
-                ++$skipped;
+
+                try {
+                    if (isset($existing[$uri])) {
+                        $this->backend->updateCard($addressBookId, $uri, $serialized);
+                        ++$updated;
+                    } else {
+                        $this->backend->createCard($addressBookId, $uri, $serialized);
+                        $existing[$uri] = true;
+                        ++$imported;
+                    }
+                } catch (\Throwable $e) {
+                    error_log('portal contact import ' . $uri . ': ' . $e->getMessage());
+                    ++$skipped;
+                }
+
                 if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
                     $onProgress($n, $total, $imported, $updated, $skipped);
                 }
-                continue;
-            }
 
-            $uid = isset($parsed->UID) ? (string) $parsed->UID : '';
-            if ($uid === '') {
-                $uid = UUIDUtil::getUUID();
-                $parsed->UID = $uid;
-            }
-
-            // True v3 document first, then re-encode PHOTO (no raw binary polyglots)
-            $parsed = $this->asVCard3($parsed);
-            $this->sanitizePhotoOnVCard($parsed);
-
-            $uri = $this->cardUriFromUid($uid);
-            $serialized = $parsed->serialize();
-            $parsed->destroy();
-
-            try {
-                if (isset($existing[$uri])) {
-                    $this->backend->updateCard($addressBookId, $uri, $serialized);
-                    ++$updated;
-                } else {
-                    $this->backend->createCard($addressBookId, $uri, $serialized);
-                    $existing[$uri] = true;
-                    ++$imported;
+                if ($ownsTx && $n < $total && ($n % self::IMPORT_TX_CHUNK) === 0) {
+                    $this->commitImportTransaction($ownsTx);
+                    $ownsTx = $this->beginImportTransaction();
                 }
-            } catch (\Throwable $e) {
-                error_log('portal contact import ' . $uri . ': ' . $e->getMessage());
-                ++$skipped;
             }
 
-            if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
-                $onProgress($n, $total, $imported, $updated, $skipped);
-            }
+            $this->commitImportTransaction($ownsTx);
+            $ownsTx = false;
+        } catch (\Throwable $e) {
+            $this->rollbackImportTransaction($ownsTx);
+            throw $e;
         }
 
         return [
@@ -357,6 +384,50 @@ class ContactService {
             'updated'  => $updated,
             'skipped'  => $skipped,
         ];
+    }
+
+    /**
+     * @return bool true if this caller owns a new transaction
+     */
+    private function beginImportTransaction(): bool {
+        if ($this->pdo->inTransaction()) {
+            return false;
+        }
+        try {
+            return $this->pdo->beginTransaction();
+        } catch (\Throwable $e) {
+            error_log('portal contact import beginTransaction: ' . $e->getMessage());
+
+            return false;
+        }
+    }
+
+    private function commitImportTransaction(bool $ownsTx): void {
+        if (!$ownsTx || !$this->pdo->inTransaction()) {
+            return;
+        }
+        try {
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            error_log('portal contact import commit: ' . $e->getMessage());
+            try {
+                $this->pdo->rollBack();
+            } catch (\Throwable $e2) {
+                // ignore
+            }
+            throw $e;
+        }
+    }
+
+    private function rollbackImportTransaction(bool $ownsTx): void {
+        if (!$ownsTx || !$this->pdo->inTransaction()) {
+            return;
+        }
+        try {
+            $this->pdo->rollBack();
+        } catch (\Throwable $e) {
+            error_log('portal contact import rollback: ' . $e->getMessage());
+        }
     }
 
     /**

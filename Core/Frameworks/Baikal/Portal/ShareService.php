@@ -17,6 +17,12 @@ class ShareService {
     /** Soft cap on VEVENT/VTODO/VJOURNAL components per import request */
     private const MAX_IMPORT_COMPONENTS = 10000;
 
+    /**
+     * Commit every N calendar objects during import so SQLite does not fsync
+     * per row (huge win on ZFS/NAS) while keeping lock windows bounded.
+     */
+    private const IMPORT_TX_CHUNK = 200;
+
     /** @var \PDO */
     private $pdo;
 
@@ -1128,50 +1134,69 @@ class ShareService {
             $onProgress(0, $total, 0, 0, 0);
         }
 
-        foreach ($toImport as $comp) {
-            ++$n;
-            // Keep the request alive on very large files
-            if (($n % 50) === 0 && function_exists('set_time_limit')) {
-                @set_time_limit(600);
-            }
+        // Phase 1 perf: chunked transactions (fewer fsyncs on SQLite/ZFS).
+        // If a transaction is already open, skip nesting and run without wrapping.
+        $ownsTx = false;
+        try {
+            $ownsTx = $this->beginImportTransaction();
 
-            $uid = isset($comp->UID) ? (string) $comp->UID : '';
-            if ($uid === '') {
-                $uid = UUIDUtil::getUUID();
-                $comp->UID = $uid;
-            }
+            foreach ($toImport as $comp) {
+                ++$n;
+                // Keep the request alive on very large files
+                if (($n % 50) === 0 && function_exists('set_time_limit')) {
+                    @set_time_limit(600);
+                }
 
-            $uri = $this->objectUriFromUid($uid);
+                $uid = isset($comp->UID) ? (string) $comp->UID : '';
+                if ($uid === '') {
+                    $uid = UUIDUtil::getUUID();
+                    $comp->UID = $uid;
+                }
 
-            try {
-                $object = new VCalendar();
-                $object->VERSION = '2.0';
-                $object->PRODID = '-//Baikal Portal//EN';
-                foreach ($this->referencedTimezoneIds($comp) as $tzid) {
-                    if (isset($timezonesById[$tzid])) {
-                        $object->add(clone $timezonesById[$tzid]);
+                $uri = $this->objectUriFromUid($uid);
+
+                try {
+                    $object = new VCalendar();
+                    $object->VERSION = '2.0';
+                    $object->PRODID = '-//Baikal Portal//EN';
+                    foreach ($this->referencedTimezoneIds($comp) as $tzid) {
+                        if (isset($timezonesById[$tzid])) {
+                            $object->add(clone $timezonesById[$tzid]);
+                        }
                     }
-                }
-                $object->add($comp);
-                $serialized = $object->serialize();
-                $object->destroy();
+                    $object->add($comp);
+                    $serialized = $object->serialize();
+                    $object->destroy();
 
-                if (isset($existingUris[$uri])) {
-                    $this->backend->updateCalendarObject($calId, $uri, $serialized);
-                    ++$updated;
-                } else {
-                    $this->backend->createCalendarObject($calId, $uri, $serialized);
-                    $existingUris[$uri] = true;
-                    ++$imported;
+                    if (isset($existingUris[$uri])) {
+                        $this->backend->updateCalendarObject($calId, $uri, $serialized);
+                        ++$updated;
+                    } else {
+                        $this->backend->createCalendarObject($calId, $uri, $serialized);
+                        $existingUris[$uri] = true;
+                        ++$imported;
+                    }
+                } catch (\Throwable $e) {
+                    error_log('portal import object ' . $uri . ': ' . $e->getMessage());
+                    ++$skipped;
                 }
-            } catch (\Throwable $e) {
-                error_log('portal import object ' . $uri . ': ' . $e->getMessage());
-                ++$skipped;
+
+                if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                    $onProgress($n, $total, $imported, $updated, $skipped);
+                }
+
+                // Commit every IMPORT_TX_CHUNK successful loop iterations
+                if ($ownsTx && $n < $total && ($n % self::IMPORT_TX_CHUNK) === 0) {
+                    $this->commitImportTransaction($ownsTx);
+                    $ownsTx = $this->beginImportTransaction();
+                }
             }
 
-            if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
-                $onProgress($n, $total, $imported, $updated, $skipped);
-            }
+            $this->commitImportTransaction($ownsTx);
+            $ownsTx = false;
+        } catch (\Throwable $e) {
+            $this->rollbackImportTransaction($ownsTx);
+            throw $e;
         }
 
         foreach ($timezonesById as $tz) {
@@ -1183,6 +1208,52 @@ class ShareService {
             'updated'  => $updated,
             'skipped'  => $skipped,
         ];
+    }
+
+    /**
+     * Start a DB transaction for bulk import if none is active.
+     *
+     * @return bool true if this caller owns a new transaction
+     */
+    private function beginImportTransaction(): bool {
+        if ($this->pdo->inTransaction()) {
+            return false;
+        }
+        try {
+            return $this->pdo->beginTransaction();
+        } catch (\Throwable $e) {
+            error_log('portal import beginTransaction: ' . $e->getMessage());
+
+            return false;
+        }
+    }
+
+    private function commitImportTransaction(bool $ownsTx): void {
+        if (!$ownsTx || !$this->pdo->inTransaction()) {
+            return;
+        }
+        try {
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            error_log('portal import commit: ' . $e->getMessage());
+            try {
+                $this->pdo->rollBack();
+            } catch (\Throwable $e2) {
+                // ignore
+            }
+            throw $e;
+        }
+    }
+
+    private function rollbackImportTransaction(bool $ownsTx): void {
+        if (!$ownsTx || !$this->pdo->inTransaction()) {
+            return;
+        }
+        try {
+            $this->pdo->rollBack();
+        } catch (\Throwable $e) {
+            error_log('portal import rollback: ' . $e->getMessage());
+        }
     }
 
     /**

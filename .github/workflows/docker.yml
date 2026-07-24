@@ -2,7 +2,10 @@ name: docker
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
+      # Phase 1 import perf test image → ghcr.io/.../baikal:perf-import-sqlite-tx
+      - perf/import-sqlite-tx
     tags: ["v*"]
   pull_request:
     branches: [master]
@@ -41,8 +44,10 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
+            type=ref,event=branch
             type=ref,event=tag
             type=semver,pattern={{version}}
+            type=raw,value=import-tx-test,enable=${{ github.ref == 'refs/heads/perf/import-sqlite-tx' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
