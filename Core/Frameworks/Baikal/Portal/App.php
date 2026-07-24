@@ -774,6 +774,10 @@ class App {
         header('Cache-Control: no-store');
         header('X-Content-Type-Options: nosniff');
         header('X-Accel-Buffering: no'); // nginx: disable proxy buffering
+        // Force headers out before the long parse/write loop (avoids 504 "reading response header")
+        if (function_exists('header_remove')) {
+            // no-op guard
+        }
 
         $emit = static function (array $payload): void {
             $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
@@ -786,6 +790,18 @@ class App {
             }
             flush();
         };
+
+        // Immediate first line so nginx/browser leave "waiting for headers" state
+        $emit([
+            'type'     => 'progress',
+            'current'  => 0,
+            'total'    => 0,
+            'percent'  => 0,
+            'imported' => 0,
+            'updated'  => 0,
+            'skipped'  => 0,
+            'phase'    => 'starting',
+        ]);
 
         try {
             $result = $importFn(static function (

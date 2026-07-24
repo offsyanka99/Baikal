@@ -116,6 +116,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
   - **Server:** all portal request tracing → `Specific/portal_debug.log` (never nginx `[error]`)
   - If docker logs show `FastCGI sent in stderr: "PHP message: Baikal portal: …"` you are on an **old image** (or did not re-pull `latest`). Force recreate after pull.
   - Public `GET /api/ui` returns prefs (including log level) without a session
+- Large calendar/contact **import**: progress streams as NDJSON; nginx `/api` allows **900s** FastCGI read (was 300s → 504 after 5 minutes). Each event is a separate DB write — ~1 MB ICS can still take several minutes on NAS storage.
 
 ### API (summary)
 
@@ -273,7 +274,8 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasi
 - Tasks bulk-bar UX (green apply icons; Delete / Clear selection on second row); Calendar details: Share before Import/export
 - Portal time format / week start prefs (`portal_time_format`, `portal_week_start` or env overrides)
 - Portal debug log level (`portal_log_level` / `PORTAL_LOG_LEVEL`: off|error|warn|info|debug) → browser + `Specific/portal_debug.log`
-- **Import progress modal** for large calendar (`.ics`) and contact (`.vcf`) files (phases, elapsed time, result)
+- **Import progress modal** for large calendar (`.ics`) and contact (`.vcf`) files (live %, elapsed time, result)
+- Nginx `/api` FastCGI timeouts **900s** + unbuffered streaming (avoids 504 at 5 minutes)
 - TrueNAS hardening: `BAIKAL_SKIP_CHOWN`, entrypoint chown limited to `config/` + `Specific/`
 - Public `GET /api/ui` for portal prefs before login
 
