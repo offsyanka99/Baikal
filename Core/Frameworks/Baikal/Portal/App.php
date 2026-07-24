@@ -26,6 +26,9 @@ class App {
     /** @var array<string, mixed>|null Cached JSON body (php://input is one-shot) */
     private $jsonBodyCache;
 
+    /** True when a streaming / download response was already sent (skip json()). */
+    private $responseSent = false;
+
     public function __construct(\PDO $pdo, array $config) {
         $this->config = $config;
         $realm = (string) ($config['system']['auth_realm'] ?? 'BaikalDAV');
@@ -225,6 +228,14 @@ class App {
             }
 
             $result = $this->dispatch($method, $path);
+            if ($this->responseSent) {
+                $this->portalServerLog(
+                    sprintf('%s %s → stream done (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
+                    'info'
+                );
+
+                return;
+            }
             $this->json(200, $result);
             $this->portalServerLog(
                 sprintf('%s %s → 200 (%dms)', $method, $path, (int) ((microtime(true) - $t0) * 1000)),
@@ -405,12 +416,19 @@ class App {
         }
 
         // POST /calendars/{id}/import — ICS body (JSON {ics} or raw text/calendar)
+        // Accept: application/x-ndjson → stream progress lines for the portal modal
         if ($method === 'POST' && preg_match('#^/calendars/(\d+)/import$#', $path, $m)) {
             $instanceId = (int) $m[1];
             $ics = $this->readIcsPayload();
-            $result = $this->shares->importCalendar($username, $instanceId, $ics);
+            if ($this->wantsImportProgressStream()) {
+                $this->streamImportProgress(function (?callable $onProgress) use ($username, $instanceId, $ics) {
+                    return $this->shares->importCalendar($username, $instanceId, $ics, false, $onProgress);
+                });
 
-            return $result;
+                return null;
+            }
+
+            return $this->shares->importCalendar($username, $instanceId, $ics);
         }
 
         if (preg_match('#^/calendars/(\d+)/shares$#', $path, $m)) {
@@ -470,9 +488,15 @@ class App {
         if ($method === 'POST' && preg_match('#^/addressbooks/(\d+)/import$#', $path, $m)) {
             $id = (int) $m[1];
             $vcf = $this->readPayloadField('vcf', ['text/vcard', 'text/x-vcard', 'text/directory']);
-            $result = $this->contacts->importAddressBook($username, $id, $vcf);
+            if ($this->wantsImportProgressStream()) {
+                $this->streamImportProgress(function (?callable $onProgress) use ($username, $id, $vcf) {
+                    return $this->contacts->importAddressBook($username, $id, $vcf, $onProgress);
+                });
 
-            return $result;
+                return null;
+            }
+
+            return $this->contacts->importAddressBook($username, $id, $vcf);
         }
 
         // GET list / POST create contacts
@@ -714,5 +738,99 @@ class App {
         header('X-Content-Type-Options: nosniff');
         header('Content-Length: ' . (string) strlen($body));
         echo $body;
+    }
+
+    /** Portal import UI requests Accept: application/x-ndjson for live %. */
+    private function wantsImportProgressStream(): bool {
+        $accept = strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? ''));
+
+        return str_contains($accept, 'application/x-ndjson')
+            || (isset($_GET['progress']) && (string) $_GET['progress'] === '1');
+    }
+
+    /**
+     * Stream NDJSON progress for long imports (each line is one JSON object).
+     * progress → {type,current,total,percent,imported,updated,skipped}
+     * done     → {type,result:{imported,updated,skipped}}
+     * error    → {type,error,status}
+     *
+     * @param callable(?callable): array{imported: int, updated: int, skipped: int} $importFn
+     */
+    private function streamImportProgress(callable $importFn): void {
+        $this->responseSent = true;
+
+        // Disable output buffers so the browser sees progress lines early
+        while (ob_get_level() > 0) {
+            @ob_end_flush();
+        }
+        @ini_set('output_buffering', 'off');
+        @ini_set('zlib.output_compression', '0');
+        if (function_exists('apache_setenv')) {
+            @apache_setenv('no-gzip', '1');
+        }
+
+        http_response_code(200);
+        header('Content-Type: application/x-ndjson; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        header('X-Accel-Buffering: no'); // nginx: disable proxy buffering
+
+        $emit = static function (array $payload): void {
+            $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+            if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+                $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+            }
+            echo json_encode($payload, $flags) . "\n";
+            if (function_exists('ob_flush')) {
+                @ob_flush();
+            }
+            flush();
+        };
+
+        try {
+            $result = $importFn(static function (
+                int $current,
+                int $total,
+                int $imported,
+                int $updated,
+                int $skipped
+            ) use ($emit): void {
+                $percent = $total > 0 ? (int) min(100, max(0, (int) round(100 * $current / $total))) : 0;
+                $emit([
+                    'type'     => 'progress',
+                    'current'  => $current,
+                    'total'    => $total,
+                    'percent'  => $percent,
+                    'imported' => $imported,
+                    'updated'  => $updated,
+                    'skipped'  => $skipped,
+                ]);
+            });
+            $emit([
+                'type'   => 'done',
+                'result' => [
+                    'imported' => (int) ($result['imported'] ?? 0),
+                    'updated'  => (int) ($result['updated'] ?? 0),
+                    'skipped'  => (int) ($result['skipped'] ?? 0),
+                ],
+            ]);
+        } catch (ApiException $e) {
+            $emit([
+                'type'   => 'error',
+                'error'  => $e->getMessage(),
+                'status' => $e->getStatus(),
+            ]);
+        } catch (\Throwable $e) {
+            error_log('Baikal portal import stream: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+            $msg = 'Internal server error';
+            if (stripos($e->getMessage(), 'Maximum execution time') !== false) {
+                $msg = 'Import timed out. Try a smaller export, or import again (already-imported items update faster).';
+            }
+            $emit([
+                'type'   => 'error',
+                'error'  => $msg,
+                'status' => 500,
+            ]);
+        }
     }
 }

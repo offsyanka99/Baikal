@@ -36,6 +36,16 @@ export type ImportResult = {
   skipped: number;
 };
 
+/** Live import progress (NDJSON stream from server). */
+export type ImportProgressEvent = {
+  percent: number;
+  current: number;
+  total: number;
+  imported: number;
+  updated: number;
+  skipped: number;
+};
+
 /** VEVENT occurrence for the month grid (from GET /calendars/{id}/events) */
 export type CalendarEvent = {
   uid: string;
@@ -337,6 +347,148 @@ function encUri(uri: string): string {
   return encodeURIComponent(uri);
 }
 
+/**
+ * Long calendar/contact imports stream NDJSON progress lines when
+ * Accept: application/x-ndjson is sent (portal import modal).
+ */
+async function streamImport<T extends ImportResult>(
+  path: string,
+  body: Record<string, string>,
+  onProgress?: (p: ImportProgressEvent) => void,
+): Promise<T> {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "application/x-ndjson",
+  });
+  if (csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+  const t0 =
+    typeof performance !== "undefined" ? performance.now() : Date.now();
+  log.debug(`api → POST ${path} (stream)`);
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+
+  // Non-stream error (auth/CSRF before body) — may still be JSON
+  const ct = (res.headers.get("Content-Type") || "").toLowerCase();
+  if (!res.ok && !ct.includes("ndjson") && !ct.includes("x-ndjson")) {
+    let msg = `Request failed (${res.status})`;
+    try {
+      const data = (await res.json()) as { error?: string };
+      if (data.error) msg = data.error;
+    } catch {
+      /* ignore */
+    }
+    log.warn(`api ← POST ${path} ${res.status}`, msg);
+    throw new ApiError(msg, res.status);
+  }
+
+  if (!res.body) {
+    throw new ApiError("Import stream unavailable", 500);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let final: T | null = null;
+  let streamError: { message: string; status: number } | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let msg: {
+        type?: string;
+        percent?: number;
+        current?: number;
+        total?: number;
+        imported?: number;
+        updated?: number;
+        skipped?: number;
+        result?: T;
+        error?: string;
+        status?: number;
+      };
+      try {
+        msg = JSON.parse(trimmed) as typeof msg;
+      } catch {
+        log.debug("import stream non-JSON line", trimmed.slice(0, 80));
+        continue;
+      }
+      if (msg.type === "progress") {
+        const total = Number(msg.total) || 0;
+        const current = Number(msg.current) || 0;
+        const percent =
+          typeof msg.percent === "number"
+            ? msg.percent
+            : total > 0
+              ? Math.round((100 * current) / total)
+              : 0;
+        onProgress?.({
+          percent,
+          current,
+          total,
+          imported: Number(msg.imported) || 0,
+          updated: Number(msg.updated) || 0,
+          skipped: Number(msg.skipped) || 0,
+        });
+      } else if (msg.type === "done" && msg.result) {
+        final = msg.result;
+      } else if (msg.type === "error") {
+        streamError = {
+          message: msg.error || "Import failed",
+          status: msg.status || 500,
+        };
+      }
+    }
+  }
+
+  // Trailing line without newline
+  if (buf.trim()) {
+    try {
+      const msg = JSON.parse(buf.trim()) as {
+        type?: string;
+        result?: T;
+        error?: string;
+        status?: number;
+      };
+      if (msg.type === "done" && msg.result) final = msg.result;
+      if (msg.type === "error") {
+        streamError = {
+          message: msg.error || "Import failed",
+          status: msg.status || 500,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const ms = Math.round(
+    (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+  );
+
+  if (streamError) {
+    log.warn(`api ← POST ${path} stream error (${ms}ms)`, streamError.message);
+    throw new ApiError(streamError.message, streamError.status);
+  }
+  if (!final) {
+    log.error(`api ← POST ${path} stream incomplete (${ms}ms)`);
+    throw new ApiError("Import ended without a result", 500);
+  }
+  log.info(`api ← POST ${path} stream done (${ms}ms)`);
+  return final;
+}
+
 export const api = {
   /** Public portal prefs (no session). Used early to apply log level before login. */
   ui: () => request<{ ui: PortalUi }>("/ui"),
@@ -438,11 +590,12 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename };
   },
-  importCalendar: (instanceId: number, ics: string) =>
-    request<ImportResult>(`/calendars/${instanceId}/import`, {
-      method: "POST",
-      body: JSON.stringify({ ics }),
-    }),
+  importCalendar: (
+    instanceId: number,
+    ics: string,
+    onProgress?: (p: ImportProgressEvent) => void,
+  ) =>
+    streamImport<ImportResult>(`/calendars/${instanceId}/import`, { ics }, onProgress),
   directory: () => request<{ users: DirectoryUser[] }>("/directory"),
   shares: (instanceId: number) =>
     request<{ shares: Share[] }>(`/calendars/${instanceId}/shares`),
@@ -503,11 +656,12 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename };
   },
-  importAddressBook: (id: number, vcf: string) =>
-    request<ImportResult>(`/addressbooks/${id}/import`, {
-      method: "POST",
-      body: JSON.stringify({ vcf }),
-    }),
+  importAddressBook: (
+    id: number,
+    vcf: string,
+    onProgress?: (p: ImportProgressEvent) => void,
+  ) =>
+    streamImport<ImportResult>(`/addressbooks/${id}/import`, { vcf }, onProgress),
 
   contacts: (abId: number, q = "") => {
     const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";

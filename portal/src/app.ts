@@ -260,6 +260,13 @@ export function mountApp(root: HTMLElement): void {
     phase: "reading" | "uploading" | "processing" | "done" | "error";
     /** 0–100 while reading large files; null when unknown */
     readPercent: number | null;
+    /** Server component progress (events/cards) */
+    processPercent: number | null;
+    processCurrent: number;
+    processTotal: number;
+    processImported: number;
+    processUpdated: number;
+    processSkipped: number;
     startedAt: number;
     elapsedSec: number;
     resultMessage: string | null;
@@ -1575,10 +1582,9 @@ export function mountApp(root: HTMLElement): void {
         ...importProgress,
         elapsedSec: Math.floor((Date.now() - importProgress.startedAt) / 1000),
       };
-      // Light update: refresh status line only (elapsed lives there while processing)
-      const status = root.querySelector<HTMLElement>("[data-import-status-line]");
-      if (status && importProgress.phase === "processing") {
-        status.textContent = `Still working… ${formatElapsed(importProgress.elapsedSec)} (large files can take several minutes)`;
+      // Light update: status + bar without full re-render
+      if (importProgress.phase === "processing") {
+        updateImportProgressDom(importProgress);
       }
     }, 1000);
   }
@@ -1601,6 +1607,59 @@ export function mountApp(root: HTMLElement): void {
     stopImportElapsedTimer();
     importProgress = null;
     render();
+  }
+
+  function applyServerImportProgress(p: {
+    percent: number;
+    current: number;
+    total: number;
+    imported: number;
+    updated: number;
+    skipped: number;
+  }): void {
+    if (!importProgress || importProgress.phase === "done" || importProgress.phase === "error") {
+      return;
+    }
+    importProgress = {
+      ...importProgress,
+      phase: "processing",
+      processPercent: p.percent,
+      processCurrent: p.current,
+      processTotal: p.total,
+      processImported: p.imported,
+      processUpdated: p.updated,
+      processSkipped: p.skipped,
+      elapsedSec: Math.floor((Date.now() - importProgress.startedAt) / 1000),
+    };
+    updateImportProgressDom(importProgress);
+  }
+
+  function updateImportProgressDom(p: ImportProgress): void {
+    const status = root.querySelector<HTMLElement>("[data-import-status-line]");
+    const bar = root.querySelector<HTMLElement>(".import-progress-bar");
+    const track = root.querySelector<HTMLElement>(".import-progress-track");
+    const counts = root.querySelector<HTMLElement>("[data-import-counts]");
+    const unit = p.kind === "calendar" ? "items" : "contacts";
+    let statusLine: string;
+    if (p.phase === "processing" && p.processTotal > 0) {
+      statusLine = `Importing ${p.processCurrent.toLocaleString()} / ${p.processTotal.toLocaleString()} ${unit} (${p.processPercent ?? 0}%) · ${formatElapsed(p.elapsedSec)}`;
+    } else if (p.phase === "processing") {
+      statusLine = `Importing on server… ${formatElapsed(p.elapsedSec)}`;
+    } else {
+      return;
+    }
+    if (status) status.textContent = statusLine;
+    if (counts) {
+      counts.textContent = `${p.processImported} new · ${p.processUpdated} updated${p.processSkipped ? ` · ${p.processSkipped} skipped` : ""}`;
+    }
+    if (bar && p.processPercent !== null) {
+      bar.classList.remove("is-indeterminate");
+      bar.style.width = `${Math.min(100, Math.max(0, p.processPercent))}%`;
+    }
+    if (track && p.processPercent !== null) {
+      track.setAttribute("aria-valuenow", String(p.processPercent));
+      track.removeAttribute("aria-valuetext");
+    }
   }
 
   function renderImportProgressModal(): string {
@@ -1643,21 +1702,31 @@ export function mountApp(root: HTMLElement): void {
 
     let body = "";
     if (running) {
-      const barPct =
-        p.phase === "reading" && p.readPercent !== null
-          ? Math.min(100, Math.max(0, p.readPercent))
-          : null;
+      let barPct: number | null = null;
+      if (p.phase === "reading" && p.readPercent !== null) {
+        barPct = Math.min(100, Math.max(0, p.readPercent));
+      } else if (p.phase === "processing" && p.processPercent !== null) {
+        barPct = Math.min(100, Math.max(0, p.processPercent));
+      }
       const barClass =
         barPct === null ? "import-progress-bar is-indeterminate" : "import-progress-bar";
       const barStyle = barPct !== null ? ` style="width:${barPct}%"` : "";
-      const statusLine =
-        p.phase === "reading"
-          ? p.readPercent !== null
-            ? `Reading file… ${p.readPercent}%`
-            : "Reading file…"
-          : p.phase === "uploading"
-            ? "Uploading to server…"
-            : `Still working… ${formatElapsed(p.elapsedSec)} (large files can take several minutes)`;
+      const unit = p.kind === "calendar" ? "items" : "contacts";
+      let statusLine: string;
+      if (p.phase === "reading") {
+        statusLine =
+          p.readPercent !== null ? `Reading file… ${p.readPercent}%` : "Reading file…";
+      } else if (p.phase === "uploading") {
+        statusLine = "Uploading to server…";
+      } else if (p.processTotal > 0) {
+        statusLine = `Importing ${p.processCurrent.toLocaleString()} / ${p.processTotal.toLocaleString()} ${unit} (${p.processPercent ?? 0}%) · ${formatElapsed(p.elapsedSec)}`;
+      } else {
+        statusLine = `Importing on server… ${formatElapsed(p.elapsedSec)}`;
+      }
+      const countsLine =
+        p.phase === "processing" && p.processTotal > 0
+          ? `<p class="muted small" data-import-counts style="margin:0 0 0.5rem">${p.processImported} new · ${p.processUpdated} updated${p.processSkipped ? ` · ${p.processSkipped} skipped` : ""}</p>`
+          : `<p class="muted small" data-import-counts style="margin:0 0 0.5rem;display:none"></p>`;
       body = `
         <p class="muted small" style="margin:0 0 0.75rem">
           Importing <strong>${esc(kindLabel)}</strong> from
@@ -1672,7 +1741,10 @@ export function mountApp(root: HTMLElement): void {
           <div class="${barClass}"${barStyle}></div>
         </div>
         <p class="import-status-line" data-import-status-line>${esc(statusLine)}</p>
-        <p class="muted small">Keep this tab open until the import finishes.</p>`;
+        ${countsLine}
+        <p class="muted small">Keep this tab open until the import finishes.
+          ${p.kind === "calendar" ? "Each event is written separately — ~1&nbsp;MB calendars can take several minutes on a NAS." : ""}
+        </p>`;
     } else if (p.phase === "done") {
       body = `
         <div class="flash flash-success import-result" role="status" style="margin:0 0 1rem">
@@ -4992,6 +5064,12 @@ export function mountApp(root: HTMLElement): void {
       fileSizeLabel: formatFileSize(file.size),
       phase: "reading",
       readPercent: 0,
+      processPercent: null,
+      processCurrent: 0,
+      processTotal: 0,
+      processImported: 0,
+      processUpdated: 0,
+      processSkipped: 0,
       startedAt: Date.now(),
       elapsedSec: 0,
       resultMessage: null,
@@ -5012,13 +5090,15 @@ export function mountApp(root: HTMLElement): void {
         if (status && pct !== null) status.textContent = `Reading file… ${pct}%`;
       });
       setImportPhase("uploading", { readPercent: 100 });
-      setImportPhase("processing");
+      setImportPhase("processing", { processPercent: 0 });
       log.event("import.contacts.start", {
         file: file.name,
         bytes: file.size,
         abId,
       });
-      const res = await api.importAddressBook(abId, vcf);
+      const res = await api.importAddressBook(abId, vcf, (prog) => {
+        applyServerImportProgress(prog);
+      });
       const detail = formatImportResult(res);
       lastContactImportResult = { ok: true, message: detail };
       await loadHome();
@@ -5292,6 +5372,12 @@ export function mountApp(root: HTMLElement): void {
       fileSizeLabel: formatFileSize(file.size),
       phase: "reading",
       readPercent: 0,
+      processPercent: null,
+      processCurrent: 0,
+      processTotal: 0,
+      processImported: 0,
+      processUpdated: 0,
+      processSkipped: 0,
       startedAt: Date.now(),
       elapsedSec: 0,
       resultMessage: null,
@@ -5312,13 +5398,15 @@ export function mountApp(root: HTMLElement): void {
         if (status && pct !== null) status.textContent = `Reading file… ${pct}%`;
       });
       setImportPhase("uploading", { readPercent: 100 });
-      setImportPhase("processing");
+      setImportPhase("processing", { processPercent: 0 });
       log.event("import.calendar.start", {
         file: file.name,
         bytes: file.size,
         calId,
       });
-      const res = await api.importCalendar(calId, ics);
+      const res = await api.importCalendar(calId, ics, (prog) => {
+        applyServerImportProgress(prog);
+      });
       const detail = formatImportResult(res);
       lastImportResult = { ok: true, message: detail };
       if (selectedId === calId) await loadMonthEvents();

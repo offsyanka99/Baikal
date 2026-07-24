@@ -1039,14 +1039,18 @@ class ShareService {
      * Optimized for large Thunderbird exports (thousands of components):
      * longer PHP time limit, one-shot existing-URI lookup, lean VTIMEZONE attach.
      *
+     * Optional $onProgress(current, total, imported, updated, skipped) for streaming UIs.
+     *
+     * @param callable(int, int, int, int, int): void|null $onProgress
+     *
      * @return array{imported: int, updated: int, skipped: int}
      */
-    public function importCalendar(string $username, int $instanceId, string $icsData, bool $allowReadOnly = false): array {
+    public function importCalendar(string $username, int $instanceId, string $icsData, bool $allowReadOnly = false, ?callable $onProgress = null): array {
         // Large .ics files (Thunderbird full export) exceed the default 30s easily.
         if (function_exists('set_time_limit')) {
-            @set_time_limit(300);
+            @set_time_limit(600);
         }
-        @ini_set('max_execution_time', '300');
+        @ini_set('max_execution_time', '600');
         @ini_set('memory_limit', '256M');
 
         $calId = $this->requireCalendarAccess($username, $instanceId, true);
@@ -1116,12 +1120,19 @@ class ShareService {
         $updated = 0;
         $skipped = 0;
         $n = 0;
+        $total = count($toImport);
+        // ~100 UI updates max (not every component on huge files)
+        $progressEvery = max(1, (int) min(25, max(1, (int) floor($total / 100))));
+
+        if ($onProgress !== null) {
+            $onProgress(0, $total, 0, 0, 0);
+        }
 
         foreach ($toImport as $comp) {
             ++$n;
             // Keep the request alive on very large files
             if (($n % 50) === 0 && function_exists('set_time_limit')) {
-                @set_time_limit(300);
+                @set_time_limit(600);
             }
 
             $uid = isset($comp->UID) ? (string) $comp->UID : '';
@@ -1156,6 +1167,10 @@ class ShareService {
             } catch (\Throwable $e) {
                 error_log('portal import object ' . $uri . ': ' . $e->getMessage());
                 ++$skipped;
+            }
+
+            if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                $onProgress($n, $total, $imported, $updated, $skipped);
             }
         }
 

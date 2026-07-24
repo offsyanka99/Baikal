@@ -238,13 +238,17 @@ class ContactService {
     }
 
     /**
+     * Optional $onProgress(current, total, imported, updated, skipped) for streaming UIs.
+     *
+     * @param callable(int, int, int, int, int): void|null $onProgress
+     *
      * @return array{imported: int, updated: int, skipped: int}
      */
-    public function importAddressBook(string $username, int $addressBookId, string $vcfData): array {
+    public function importAddressBook(string $username, int $addressBookId, string $vcfData, ?callable $onProgress = null): array {
         if (function_exists('set_time_limit')) {
-            @set_time_limit(300);
+            @set_time_limit(600);
         }
-        @ini_set('max_execution_time', '300');
+        @ini_set('max_execution_time', '600');
         @ini_set('memory_limit', '256M');
 
         $this->requireOwnedAddressBook($username, $addressBookId);
@@ -282,11 +286,17 @@ class ContactService {
         $updated = 0;
         $skipped = 0;
         $n = 0;
+        $total = count($cards);
+        $progressEvery = max(1, (int) min(25, max(1, (int) floor($total / 100))));
+
+        if ($onProgress !== null) {
+            $onProgress(0, $total, 0, 0, 0);
+        }
 
         foreach ($cards as $cardRaw) {
             ++$n;
             if (($n % 50) === 0 && function_exists('set_time_limit')) {
-                @set_time_limit(300);
+                @set_time_limit(600);
             }
 
             try {
@@ -294,12 +304,18 @@ class ContactService {
             } catch (\Throwable $e) {
                 error_log('portal contact parse: ' . $e->getMessage());
                 ++$skipped;
+                if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                    $onProgress($n, $total, $imported, $updated, $skipped);
+                }
                 continue;
             }
 
             if ($parsed->name !== 'VCARD') {
                 $parsed->destroy();
                 ++$skipped;
+                if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                    $onProgress($n, $total, $imported, $updated, $skipped);
+                }
                 continue;
             }
 
@@ -329,6 +345,10 @@ class ContactService {
             } catch (\Throwable $e) {
                 error_log('portal contact import ' . $uri . ': ' . $e->getMessage());
                 ++$skipped;
+            }
+
+            if ($onProgress !== null && ($n === $total || ($n % $progressEvery) === 0)) {
+                $onProgress($n, $total, $imported, $updated, $skipped);
             }
         }
 
