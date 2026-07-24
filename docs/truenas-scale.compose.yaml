@@ -29,7 +29,8 @@
 #   1. Admin creates user1 + user2 under /admin/
 #   2. user1 opens /portal/ , signs in with DAV password
 #   3. Calendar: month view, events (RRULE), Edit modal (share, import/export .ics)
-#      Large imports show a progress dialog — keep the tab open until finished
+#      Add calendar → Import .ics (create + import); large files show live % progress
+#      Bulk imports use chunked SQLite txs (typically seconds, not minutes, on NAS)
 #   4. Contacts: address books, import/export .vcf (progress dialog for large files)
 #   Classic backup UI: /dav.php/
 #

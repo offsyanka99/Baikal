@@ -73,7 +73,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 |------|--------|
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
-| 3 | **Calendar:** owned list (Edit / Delete), month grid with create/edit/delete events (RRULE), holidays/read-only; details, share, then import/export `.ics` (progress dialog with **live %** of events + result) |
+| 3 | **Calendar:** owned list (Edit / Delete), month grid with create/edit/delete events (RRULE), holidays/read-only; details, share, import/export `.ics`; **Add calendar → Import .ics**; large imports show **live %** (chunked SQLite txs keep NAS imports fast) |
 | 4 | **Contacts:** address books (delete confirm), contact search/CRUD, photos, birthday/special dates, custom fields, book + single-contact `.vcf` export (progress dialog with **live %** of cards + result) |
 | 5 | **Tasks / Notes:** CalDAV `VTODO` / `VJOURNAL` on writable calendars (bulk actions on tasks) |
 
@@ -116,7 +116,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
   - **Server:** all portal request tracing → `Specific/portal_debug.log` (never nginx `[error]`)
   - If docker logs show `FastCGI sent in stderr: "PHP message: Baikal portal: …"` you are on an **old image** (or did not re-pull `latest`). Force recreate after pull.
   - Public `GET /api/ui` returns prefs (including log level) without a session
-- Large calendar/contact **import**: progress streams as NDJSON; nginx `/api` allows **900s** FastCGI read (was 300s → 504 after 5 minutes). Each event is a separate DB write — ~1 MB ICS can still take several minutes on NAS storage.
+- Large calendar/contact **import**: progress streams as NDJSON; nginx `/api` allows **900s** FastCGI read. Writes use **chunked SQLite transactions** (every 200 objects) so bulk imports on TrueNAS/ZFS finish in seconds rather than minutes. **Add calendar → Import .ics** creates a calendar and imports in one step.
 
 ### API (summary)
 
@@ -275,7 +275,9 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasi
 - Portal time format / week start prefs (`portal_time_format`, `portal_week_start` or env overrides)
 - Portal debug log level (`portal_log_level` / `PORTAL_LOG_LEVEL`: off|error|warn|info|debug) → browser + `Specific/portal_debug.log`
 - **Import progress modal** for large calendar (`.ics`) and contact (`.vcf`) files (live %, elapsed time, result)
-- Nginx `/api` FastCGI timeouts **900s** + unbuffered streaming (avoids 504 at 5 minutes)
+- **Import performance (Phase 1):** chunked SQLite transactions (commit every 200 objects) for calendar + contact portal imports
+- **Add calendar → Import .ics** one-shot create + import
+- Nginx `/api` FastCGI timeouts **900s** + unbuffered NDJSON streaming
 - TrueNAS hardening: `BAIKAL_SKIP_CHOWN`, entrypoint chown limited to `config/` + `Specific/`
 - Public `GET /api/ui` for portal prefs before login
 
