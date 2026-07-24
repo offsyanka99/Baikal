@@ -29,9 +29,14 @@
 #   1. Admin creates user1 + user2 under /admin/
 #   2. user1 opens /portal/ , signs in with DAV password
 #   3. Calendar: month view, events (RRULE), Edit modal (share, import/export .ics)
+#      Select owned or shared calendars (read-only / full access) to view events
 #      Add calendar → Import .ics (create + import); large files show live % progress
 #      Bulk imports use chunked SQLite txs (typically seconds, not minutes, on NAS)
 #   4. Contacts: address books, import/export .vcf (progress dialog for large files)
+#
+# Bug fixes in 0.11.1-fork.4 (summary): shared calendars selectable; import progress
+#   no longer aborts at start or 5m timeout; skip-chown startup; fast bulk import.
+#   Full list: docs/DEPLOYMENT.md → Release notes → 0.11.1-fork.4
 #   Classic backup UI: /dav.php/
 #
 # Home Assistant CalDAV:

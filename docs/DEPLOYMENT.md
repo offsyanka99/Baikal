@@ -73,7 +73,7 @@ Tabs: **Calendar** · **Contacts** · **Tasks** · **Notes**. Section help is un
 |------|--------|
 | 1 | Open `http://NAS-IP:31088/portal/` |
 | 2 | Sign in with a **DAV user** (created in Admin → Users), not the admin password |
-| 3 | **Calendar:** owned list (Edit / Delete), month grid with create/edit/delete events (RRULE), holidays/read-only; details, share, import/export `.ics`; **Add calendar → Import .ics**; large imports show **live %** (chunked SQLite txs keep NAS imports fast) |
+| 3 | **Calendar:** owned list (Edit / Delete), month grid with create/edit/delete events (RRULE), holidays/read-only; details, share, import/export `.ics`; **select shared calendars** (read-only or full access) to view/edit events; **Add calendar → Import .ics**; large imports show **live %** (chunked SQLite txs keep NAS imports fast) |
 | 4 | **Contacts:** address books (delete confirm), contact search/CRUD, photos, birthday/special dates, custom fields, book + single-contact `.vcf` export (progress dialog with **live %** of cards + result) |
 | 5 | **Tasks / Notes:** CalDAV `VTODO` / `VJOURNAL` on writable calendars (bulk actions on tasks) |
 
@@ -280,6 +280,18 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasi
 - Nginx `/api` FastCGI timeouts **900s** + unbuffered NDJSON streaming
 - TrueNAS hardening: `BAIKAL_SKIP_CHOWN`, entrypoint chown limited to `config/` + `Specific/`
 - Public `GET /api/ui` for portal prefs before login
+
+#### Bug fixes in this release
+
+| Issue | Fix |
+|-------|-----|
+| Shared calendars listed but **not selectable** (read-only or full access) | “Shared with me” rows use `select-cal`; month grid loads events |
+| Full-access share could not be used in portal | Same selection fix; write rules already allowed readwrite |
+| Import fails **immediately** on first progress line | Stop calling `ob_flush()` with no output buffer |
+| Import **504** after ~5 minutes | `fastcgi_read_timeout` / `send_timeout` **900s** on `/api` |
+| Docker/nginx full of fake `[error]` during portal debug | Request traces → `Specific/portal_debug.log`, not PHP stderr |
+| Container **stuck** on `40-fix-baikal-file-permissions.sh` | Skip/chown only `config`+`Specific`; `BAIKAL_SKIP_CHOWN` |
+| Large `.ics` import **~6 min** for ~2.7k events on TrueNAS | Chunked SQLite transactions (~**2s** measured) |
 
 ### 0.11.1-fork.3
 

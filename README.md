@@ -128,6 +128,15 @@ Changelog (fork)
 - Nginx `/api` FastCGI timeouts 900s + NDJSON progress stream
 - TrueNAS: `BAIKAL_SKIP_CHOWN` + entrypoint only chowns data mounts (avoids hang on full-tree `chown`)
 
+**Bug fixes (0.11.1-fork.4):**
+
+- **Shared calendars** under “Shared with me” can be **selected** to view events (read-only and full access); previously they appeared but were not clickable
+- Full-access shares can open the month grid and edit events; read-only shares open the grid for viewing only
+- Large **import** no longer dies immediately (`ob_flush` with no buffer) or at **5 minutes** (nginx FastCGI timeout raised to 900s)
+- Import progress stream no longer floods docker/nginx as fake `[error]` lines (server traces → `Specific/portal_debug.log`)
+- TrueNAS startup hang on recursive **chown** mitigated (`BAIKAL_SKIP_CHOWN` + chown only data mounts)
+- Slow bulk import on NAS SQLite fixed via chunked transactions (~minutes → ~seconds for multi-thousand event calendars)
+
 ### 0.11.1-fork.3
 
 - Portal **My Contacts**: address book create/rename/delete; contact list (table), search, create/edit/delete
