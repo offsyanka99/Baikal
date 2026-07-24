@@ -99,6 +99,7 @@ const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
     paragraphs: [
       "Export downloads a standard .ics file of the whole calendar.",
       "Import merges VEVENT, VTODO, and VJOURNAL components. The same UID updates an existing object; new UIDs create objects.",
+      "Large imports show a progress dialog (read → upload → server import) with elapsed time; keep the tab open until it finishes.",
       "Read-only calendars can still be exported, but import is disabled so reference data (e.g. holidays) stays intact.",
     ],
   },
@@ -153,6 +154,7 @@ const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
     paragraphs: [
       "Export downloads a multi-vCard .vcf file of every contact in the address book.",
       "Import accepts standard .vcf files (Thunderbird, Apple Contacts, Google). Same UID updates an existing card; new UIDs create cards.",
+      "Large imports show a progress dialog with elapsed time — keep the tab open until the result appears.",
     ],
   },
 };
@@ -246,6 +248,25 @@ export function mountApp(root: HTMLElement): void {
   /** Shown under Import/export until the next import/export or calendar change */
   let lastImportResult: { ok: boolean; message: string } | null = null;
   let lastContactImportResult: { ok: boolean; message: string } | null = null;
+  /**
+   * Full-screen import progress dialog (large .ics / .vcf can take minutes).
+   * Server import is one request — UI shows phases + elapsed time, then result.
+   */
+  type ImportProgress = {
+    kind: "calendar" | "contacts";
+    fileName: string;
+    fileSizeLabel: string;
+    /** reading | uploading | processing | done | error */
+    phase: "reading" | "uploading" | "processing" | "done" | "error";
+    /** 0–100 while reading large files; null when unknown */
+    readPercent: number | null;
+    startedAt: number;
+    elapsedSec: number;
+    resultMessage: string | null;
+    ok: boolean | null;
+  };
+  let importProgress: ImportProgress | null = null;
+  let importElapsedTimer: ReturnType<typeof setInterval> | null = null;
   let escapeBound = false;
   /** From /ui|/me + baikal.yaml / env (TIME_FORMAT, week start, log level) */
   let portalUi: {
@@ -1509,7 +1530,8 @@ export function mountApp(root: HTMLElement): void {
         ${body}
       </main>
       ${footer}
-      ${infoModalHtml()}`;
+      ${infoModalHtml()}
+      ${renderImportProgressModal()}`;
   }
 
   /** Success/error banner; shown on main page or inside open calendar modal. */
@@ -1519,6 +1541,205 @@ export function mountApp(root: HTMLElement): void {
       <span class="flash-text">${esc(flash.message)}</span>
       <button type="button" class="flash-close" data-action="flash-close" aria-label="Dismiss message" title="Dismiss">×</button>
     </div>`;
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function formatElapsed(sec: number): string {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m > 0 ? `${m}m ${r}s` : `${r}s`;
+  }
+
+  function stopImportElapsedTimer(): void {
+    if (importElapsedTimer !== null) {
+      clearInterval(importElapsedTimer);
+      importElapsedTimer = null;
+    }
+  }
+
+  function startImportElapsedTimer(): void {
+    stopImportElapsedTimer();
+    importElapsedTimer = setInterval(() => {
+      if (!importProgress || importProgress.phase === "done" || importProgress.phase === "error") {
+        stopImportElapsedTimer();
+        return;
+      }
+      importProgress = {
+        ...importProgress,
+        elapsedSec: Math.floor((Date.now() - importProgress.startedAt) / 1000),
+      };
+      // Light update: only refresh the progress dialog if present
+      const el = root.querySelector<HTMLElement>("[data-import-elapsed]");
+      if (el) {
+        el.textContent = formatElapsed(importProgress.elapsedSec);
+      }
+      const status = root.querySelector<HTMLElement>("[data-import-status-line]");
+      if (status && importProgress.phase === "processing") {
+        status.textContent = `Still working… ${formatElapsed(importProgress.elapsedSec)} (large files can take several minutes)`;
+      }
+    }, 1000);
+  }
+
+  function setImportPhase(
+    phase: ImportProgress["phase"],
+    extra: Partial<ImportProgress> = {},
+  ): void {
+    if (!importProgress) return;
+    importProgress = {
+      ...importProgress,
+      phase,
+      elapsedSec: Math.floor((Date.now() - importProgress.startedAt) / 1000),
+      ...extra,
+    };
+    render();
+  }
+
+  function closeImportProgress(): void {
+    stopImportElapsedTimer();
+    importProgress = null;
+    render();
+  }
+
+  function renderImportProgressModal(): string {
+    if (!importProgress) return "";
+    const p = importProgress;
+    const running = p.phase !== "done" && p.phase !== "error";
+    const kindLabel = p.kind === "calendar" ? "calendar (.ics)" : "contacts (.vcf)";
+    const title =
+      p.phase === "done"
+        ? "Import finished"
+        : p.phase === "error"
+          ? "Import failed"
+          : "Importing…";
+
+    const stepsHtml = (() => {
+      const order: Array<{ id: ImportProgress["phase"]; label: string }> = [
+        { id: "reading", label: "Reading file" },
+        { id: "uploading", label: "Uploading to server" },
+        { id: "processing", label: "Importing on server" },
+      ];
+      const phaseRank: Record<string, number> = {
+        reading: 0,
+        uploading: 1,
+        processing: 2,
+        done: 3,
+        error: 2,
+      };
+      const cur = phaseRank[p.phase] ?? 0;
+      return order
+        .map((s, i) => {
+          let state: "pending" | "active" | "done" = "pending";
+          if (p.phase === "done") state = "done";
+          else if (i < cur) state = "done";
+          else if (i === cur) state = p.phase === "error" ? "active" : "active";
+          const icon = state === "done" ? "✓" : state === "active" ? "●" : "○";
+          return `<li class="import-step import-step-${state}"><span class="import-step-icon" aria-hidden="true">${icon}</span> ${esc(s.label)}</li>`;
+        })
+        .join("");
+    })();
+
+    let body = "";
+    if (running) {
+      const barPct =
+        p.phase === "reading" && p.readPercent !== null
+          ? Math.min(100, Math.max(0, p.readPercent))
+          : null;
+      const barClass =
+        barPct === null ? "import-progress-bar is-indeterminate" : "import-progress-bar";
+      const barStyle = barPct !== null ? ` style="width:${barPct}%"` : "";
+      const statusLine =
+        p.phase === "reading"
+          ? p.readPercent !== null
+            ? `Reading file… ${p.readPercent}%`
+            : "Reading file…"
+          : p.phase === "uploading"
+            ? "Uploading to server…"
+            : `Still working… ${formatElapsed(p.elapsedSec)} (large files can take several minutes)`;
+      body = `
+        <p class="muted small" style="margin:0 0 0.75rem">
+          Importing <strong>${esc(kindLabel)}</strong> from
+          <span class="mono">${esc(p.fileName)}</span>
+          ${p.fileSizeLabel ? ` <span class="muted">(${esc(p.fileSizeLabel)})</span>` : ""}
+        </p>
+        <ul class="import-steps">${stepsHtml}</ul>
+        <div class="import-progress-track" role="progressbar"
+          aria-valuemin="0" aria-valuemax="100"
+          ${barPct !== null ? `aria-valuenow="${barPct}"` : 'aria-valuetext="In progress"'}
+          aria-label="Import progress">
+          <div class="${barClass}"${barStyle}></div>
+        </div>
+        <p class="import-status-line" data-import-status-line>${esc(statusLine)}</p>
+        <p class="muted small">Elapsed: <strong data-import-elapsed>${esc(formatElapsed(p.elapsedSec))}</strong>
+          · Keep this tab open until the import finishes.</p>`;
+    } else if (p.phase === "done") {
+      body = `
+        <div class="flash flash-success import-result" role="status" style="margin:0 0 1rem">
+          <strong>Success.</strong> ${esc(p.resultMessage || "Import completed.")}
+        </div>
+        <p class="muted small" style="margin:0">
+          File: <span class="mono">${esc(p.fileName)}</span>
+          · Took ${esc(formatElapsed(p.elapsedSec))}
+        </p>`;
+    } else {
+      body = `
+        <div class="flash flash-error import-result" role="status" style="margin:0 0 1rem">
+          <strong>Failed.</strong> ${esc(p.resultMessage || "Import failed.")}
+        </div>
+        <p class="muted small" style="margin:0">
+          File: <span class="mono">${esc(p.fileName)}</span>
+          · After ${esc(formatElapsed(p.elapsedSec))}
+        </p>
+        <p class="muted small">Large imports can time out; try again — already-imported items update faster.</p>`;
+    }
+
+    const footer = running
+      ? `<p class="muted small" style="margin:0">Please wait…</p>`
+      : `<button type="button" class="btn btn-primary" data-action="close-import-progress">Close</button>`;
+
+    return `
+      <div class="cal-modal import-progress-modal" role="dialog" aria-modal="true"
+        aria-labelledby="import-progress-title" data-import-progress>
+        <div class="cal-modal-backdrop"${running ? "" : ' data-action="close-import-progress"'}></div>
+        <div class="cal-modal-card cal-modal-card-sm import-progress-card">
+          <header class="cal-modal-header">
+            <h3 id="import-progress-title">${esc(title)}</h3>
+            ${
+              running
+                ? ""
+                : `<button type="button" class="info-modal-close" data-action="close-import-progress" aria-label="Close">×</button>`
+            }
+          </header>
+          <div class="cal-modal-body">${body}</div>
+          <footer class="cal-modal-footer">${footer}</footer>
+        </div>
+      </div>`;
+  }
+
+  function readFileTextWithProgress(
+    file: File,
+    onProgress: (pct: number | null) => void,
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onprogress = (ev) => {
+        if (ev.lengthComputable && ev.total > 0) {
+          onProgress(Math.min(100, Math.round((ev.loaded / ev.total) * 100)));
+        } else {
+          onProgress(null);
+        }
+      };
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () =>
+        reject(reader.error ?? new Error("Failed to read file"));
+      reader.readAsText(file);
+    });
   }
 
   function renderLogin() {
@@ -2308,7 +2529,8 @@ export function mountApp(root: HTMLElement): void {
         deleteAbConfirmId !== null ||
         eventModalOpen ||
         contactModalOpen ||
-        abModalOpen,
+        abModalOpen ||
+        importProgress !== null,
     );
     document.body.classList.toggle("layout-contacts", activeTab === "contacts");
     document.body.classList.toggle("layout-calendars", activeTab === "calendars");
@@ -2871,7 +3093,16 @@ export function mountApp(root: HTMLElement): void {
     });
     if (!escapeBound) {
       document.addEventListener("keydown", (ev: KeyboardEvent) => {
-        if (ev.key === "Escape") closeInfoModal();
+        if (ev.key !== "Escape") return;
+        if (
+          importProgress &&
+          (importProgress.phase === "done" || importProgress.phase === "error")
+        ) {
+          closeImportProgress();
+          return;
+        }
+        if (importProgress) return; // block Escape while import is running
+        closeInfoModal();
       });
       escapeBound = true;
     }
@@ -3646,6 +3877,12 @@ export function mountApp(root: HTMLElement): void {
         uri: t.dataset.uri,
       });
     }
+    if (action === "close-import-progress") {
+      if (importProgress && (importProgress.phase === "done" || importProgress.phase === "error")) {
+        closeImportProgress();
+      }
+      return;
+    }
     if (action === "logout") {
       busy = true;
       log.event("logout");
@@ -3655,6 +3892,8 @@ export function mountApp(root: HTMLElement): void {
         /* ignore */
       }
       user = null;
+      stopImportElapsedTimer();
+      importProgress = null;
       calendars = [];
       shares = [];
       selectedId = null;
@@ -4746,22 +4985,60 @@ export function mountApp(root: HTMLElement): void {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    const abId = selectedAbId;
     abModalOpen = true;
     busy = true;
     clearFlash();
     lastContactImportResult = null;
+    stopImportElapsedTimer();
+    importProgress = {
+      kind: "contacts",
+      fileName: file.name,
+      fileSizeLabel: formatFileSize(file.size),
+      phase: "reading",
+      readPercent: 0,
+      startedAt: Date.now(),
+      elapsedSec: 0,
+      resultMessage: null,
+      ok: null,
+    };
+    startImportElapsedTimer();
     render();
     try {
-      const vcf = await file.text();
-      const res = await api.importAddressBook(selectedAbId, vcf);
+      const vcf = await readFileTextWithProgress(file, (pct) => {
+        if (!importProgress || importProgress.phase !== "reading") return;
+        importProgress = { ...importProgress, readPercent: pct };
+        const bar = root.querySelector<HTMLElement>(".import-progress-bar");
+        const status = root.querySelector<HTMLElement>("[data-import-status-line]");
+        if (bar && pct !== null) {
+          bar.classList.remove("is-indeterminate");
+          bar.style.width = `${pct}%`;
+        }
+        if (status && pct !== null) status.textContent = `Reading file… ${pct}%`;
+      });
+      setImportPhase("uploading", { readPercent: 100 });
+      setImportPhase("processing");
+      log.event("import.contacts.start", {
+        file: file.name,
+        bytes: file.size,
+        abId,
+      });
+      const res = await api.importAddressBook(abId, vcf);
       const detail = formatImportResult(res);
       lastContactImportResult = { ok: true, message: detail };
       await loadHome();
-      await loadContacts(selectedAbId);
+      if (selectedAbId === abId) await loadContacts(abId);
+      stopImportElapsedTimer();
+      setImportPhase("done", {
+        ok: true,
+        resultMessage: `${detail} (from “${file.name}”)`,
+      });
       setFlash("success", `Import finished for “${file.name}”: ${detail}.`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Import failed";
       lastContactImportResult = { ok: false, message: msg };
+      stopImportElapsedTimer();
+      setImportPhase("error", { ok: false, resultMessage: msg });
       setFlash("error", msg);
     } finally {
       busy = false;
@@ -5008,17 +5285,53 @@ export function mountApp(root: HTMLElement): void {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    const calId = selectedId;
     calModalOpen = true;
     busy = true;
     clearFlash();
     lastImportResult = null;
+    stopImportElapsedTimer();
+    importProgress = {
+      kind: "calendar",
+      fileName: file.name,
+      fileSizeLabel: formatFileSize(file.size),
+      phase: "reading",
+      readPercent: 0,
+      startedAt: Date.now(),
+      elapsedSec: 0,
+      resultMessage: null,
+      ok: null,
+    };
+    startImportElapsedTimer();
     render();
     try {
-      const ics = await file.text();
-      const res = await api.importCalendar(selectedId, ics);
+      const ics = await readFileTextWithProgress(file, (pct) => {
+        if (!importProgress || importProgress.phase !== "reading") return;
+        importProgress = { ...importProgress, readPercent: pct };
+        const bar = root.querySelector<HTMLElement>(".import-progress-bar");
+        const status = root.querySelector<HTMLElement>("[data-import-status-line]");
+        if (bar && pct !== null) {
+          bar.classList.remove("is-indeterminate");
+          bar.style.width = `${pct}%`;
+        }
+        if (status && pct !== null) status.textContent = `Reading file… ${pct}%`;
+      });
+      setImportPhase("uploading", { readPercent: 100 });
+      setImportPhase("processing");
+      log.event("import.calendar.start", {
+        file: file.name,
+        bytes: file.size,
+        calId,
+      });
+      const res = await api.importCalendar(calId, ics);
       const detail = formatImportResult(res);
       lastImportResult = { ok: true, message: detail };
-      await loadMonthEvents();
+      if (selectedId === calId) await loadMonthEvents();
+      stopImportElapsedTimer();
+      setImportPhase("done", {
+        ok: true,
+        resultMessage: `${detail} (from “${file.name}”)`,
+      });
       setFlash(
         "success",
         `Import finished for “${file.name}”: ${detail}.`,
@@ -5026,6 +5339,8 @@ export function mountApp(root: HTMLElement): void {
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Import failed";
       lastImportResult = { ok: false, message: msg };
+      stopImportElapsedTimer();
+      setImportPhase("error", { ok: false, resultMessage: msg });
       setFlash("error", msg);
     } finally {
       busy = false;

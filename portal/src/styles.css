@@ -2542,6 +2542,84 @@ section.stack {
   }
 }
 
+/* Import progress overlay (above calendar/contact modals) */
+.import-progress-modal {
+  z-index: 70;
+}
+
+.import-progress-card {
+  width: min(420px, 100%);
+}
+
+.import-steps {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.import-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.import-step-done {
+  color: var(--ok);
+}
+
+.import-step-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.import-step-icon {
+  display: inline-flex;
+  width: 1.1rem;
+  justify-content: center;
+  font-size: 0.85rem;
+}
+
+.import-progress-track {
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.import-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), #60a5fa);
+  transition: width 0.15s ease-out;
+}
+
+.import-progress-bar.is-indeterminate {
+  width: 40% !important;
+  animation: import-bar-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes import-bar-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
+.import-status-line {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
 /* Calendar edit / delete modal */
 body.cal-modal-open {
   overflow: hidden;
