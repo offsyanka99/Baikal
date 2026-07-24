@@ -28,8 +28,9 @@
 # Portal (user-friendly):
 #   1. Admin creates user1 + user2 under /admin/
 #   2. user1 opens /portal/ , signs in with DAV password
-#   3. My Calendars: add/edit (name, color, description), holidays, share, import/export .ics
-#   4. My Contacts: select address book, import/export .vcf
+#   3. Calendar: month view, events (RRULE), Edit modal (share, import/export .ics)
+#      Large imports show a progress dialog — keep the tab open until finished
+#   4. Contacts: address books, import/export .vcf (progress dialog for large files)
 #   Classic backup UI: /dav.php/
 #
 # Home Assistant CalDAV:
@@ -92,7 +93,7 @@ services:
       TZ: "America/Toronto"
       TIME_FORMAT: "24h"                 # or 12h
       BAIKAL_PORTAL_WEEK_START: "monday" # or sunday
-      # Portal debug (browser DevTools + container logs). Default off.
+      # Portal debug → browser DevTools + Specific/portal_debug.log (default off).
       # PORTAL_LOG_LEVEL: "debug"        # off|error|warn|info|debug
       # Skip entrypoint chown (recommended on TrueNAS after host chown 101:101):
       BAIKAL_SKIP_CHOWN: "1"

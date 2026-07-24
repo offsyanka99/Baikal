@@ -219,11 +219,11 @@ There is no separate “TasksDAV” / “NotesDAV”: tasks are **VTODO**, notes
 | `BAIKAL_SKIP_CHOWN` | `1` | Skip entrypoint chown of `config/` + `Specific/` (use after host `chown 101:101`; recommended on TrueNAS) |
 | `TIME_FORMAT` / `BAIKAL_PORTAL_TIME_FORMAT` | `auto` (default), `12h`, `24h` | Portal time display |
 | `BAIKAL_PORTAL_WEEK_START` | `auto` (default), `monday`, `sunday` | Portal calendar week start |
-| `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL` | `off` (default), `error`, `warn`, `info`, `debug` | Portal debug logs (browser console + PHP `error_log`) |
+| `PORTAL_LOG_LEVEL` / `BAIKAL_PORTAL_LOG_LEVEL` | `off` (default), `error`, `warn`, `info`, `debug` | Portal debug: browser console + `Specific/portal_debug.log` |
 
 YAML equivalents under `system.*` in `baikal.yaml`: `portal_time_format`, `portal_week_start`, `portal_log_level`. **Env overrides YAML.**
 
-Leave `PORTAL_LOG_LEVEL` at `off` in production; use `debug` only while troubleshooting (verbose UI/API lines; no passwords).
+Leave `PORTAL_LOG_LEVEL` at `off` in production; use `debug` only while troubleshooting (verbose UI/API lines; no passwords). Request traces go to **`Specific/portal_debug.log`**, not nginx/docker error streams.
 
 ## Installer lock
 
@@ -272,7 +272,10 @@ Fork version scheme: `{upstream}-fork.{n}` (e.g. `0.11.1-fork.4`). Prefer rebasi
 - Single-contact `.vcf` export; address-book delete confirmation modal; contact birthday / special date
 - Tasks bulk-bar UX (green apply icons; Delete / Clear selection on second row); Calendar details: Share before Import/export
 - Portal time format / week start prefs (`portal_time_format`, `portal_week_start` or env overrides)
-- Portal debug log level (`portal_log_level` / `PORTAL_LOG_LEVEL`: off|error|warn|info|debug)
+- Portal debug log level (`portal_log_level` / `PORTAL_LOG_LEVEL`: off|error|warn|info|debug) → browser + `Specific/portal_debug.log`
+- **Import progress modal** for large calendar (`.ics`) and contact (`.vcf`) files (phases, elapsed time, result)
+- TrueNAS hardening: `BAIKAL_SKIP_CHOWN`, entrypoint chown limited to `config/` + `Specific/`
+- Public `GET /api/ui` for portal prefs before login
 
 ### 0.11.1-fork.3
 
