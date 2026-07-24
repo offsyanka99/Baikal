@@ -78,6 +78,7 @@ const SECTION_INFO: Record<string, { title: string; paragraphs: string[] }> = {
     title: "Add calendar",
     paragraphs: [
       "Create a normal calendar, or a holidays calendar for a chosen country (public holidays for this year and next are imported automatically via Nager.Date).",
+      "Import .ics creates a new calendar (using the display name, or the file name if the name is empty) and imports all events into it. Large files show a progress dialog.",
       "Read-only (for everyone) blocks import in the portal, forces shares to read-only, and rejects CalDAV writes (PUT/DELETE/…) from clients such as DAVx⁵, Thunderbird, and Home Assistant.",
     ],
   },
@@ -2117,8 +2118,15 @@ export function mountApp(root: HTMLElement): void {
                 </label>
                 <div class="form-actions-row form-actions-wrap">
                   <button type="submit" class="btn btn-primary" ${busy ? "disabled" : ""}>Create calendar</button>
+                  <label class="btn btn-ghost file-btn" ${busy ? "aria-disabled=true" : ""} title="Create a calendar and import a .ics file">
+                    Import .ics
+                    <input type="file" accept=".ics,text/calendar,text/plain" data-action="import-create-cal" ${busy ? "disabled" : ""} hidden />
+                  </label>
                   <button type="button" class="btn btn-ghost" data-action="close-create-cal-modal" ${busy ? "disabled" : ""}>Cancel</button>
                 </div>
+                <p class="muted small" style="margin:0.5rem 0 0">
+                  <strong>Import .ics</strong> creates the calendar (name above, or the file name), then imports events. Not for holidays/read-only calendars.
+                </p>
               </form>
             </div>
           </div>
@@ -5039,6 +5047,14 @@ export function mountApp(root: HTMLElement): void {
         void onImportFile(input);
       });
     }
+    const createImport = root.querySelector<HTMLInputElement>(
+      'input[data-action="import-create-cal"]',
+    );
+    if (createImport) {
+      createImport.addEventListener("change", () => {
+        void onImportCreateCal(createImport);
+      });
+    }
     const abInput = root.querySelector<HTMLInputElement>('input[data-action="import-ab"]');
     if (abInput) {
       abInput.addEventListener("change", () => {
@@ -5355,13 +5371,90 @@ export function mountApp(root: HTMLElement): void {
     document.body.classList.remove("info-modal-open");
   }
 
+  /** Import .ics into an existing calendar (from calendar Edit modal). */
   async function onImportFile(input: HTMLInputElement) {
     if (selectedId === null) return;
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    const calId = selectedId;
     calModalOpen = true;
+    await runCalendarImport(selectedId, file, { keepEditModalOpen: true });
+  }
+
+  /**
+   * Create a new calendar from the Add calendar form, then import .ics into it.
+   * Display name optional — falls back to file name without extension.
+   */
+  async function onImportCreateCal(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+
+    const form = root.querySelector<HTMLFormElement>('[data-form="create-cal"]');
+    const fd = form ? new FormData(form) : new FormData();
+    const holidays = fd.get("holidays") === "on";
+    const readOnly = fd.get("readOnly") === "on";
+    if (holidays) {
+      setFlash(
+        "error",
+        "Turn off “Holidays calendar” to import a .ics file into a new calendar.",
+      );
+      createCalModalOpen = true;
+      render();
+      return;
+    }
+    if (readOnly) {
+      setFlash(
+        "error",
+        "Turn off “Read-only” before importing — import cannot write to a read-only calendar.",
+      );
+      createCalModalOpen = true;
+      render();
+      return;
+    }
+
+    let displayname = String(fd.get("displayname") ?? "").trim();
+    if (!displayname) {
+      displayname = file.name.replace(/\.ics$/i, "").trim() || "Imported calendar";
+    }
+    const description = String(fd.get("description") ?? "");
+    const color = String(fd.get("color") ?? "").trim();
+
+    busy = true;
+    clearFlash();
+    lastImportResult = null;
+    createCalModalOpen = true;
+    render();
+    try {
+      const res = await api.createCalendar({
+        displayname,
+        description,
+        color,
+        readOnly: false,
+      });
+      selectedId = res.calendar.id;
+      createCalModalOpen = false;
+      await loadHome();
+      setFlash("success", `Created “${res.calendar.displayname}” — importing…`);
+      // Import with progress (busy cleared/restored inside)
+      await runCalendarImport(res.calendar.id, file, {
+        keepEditModalOpen: false,
+        successPrefix: `Calendar “${res.calendar.displayname}” created. `,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Create or import failed";
+      createCalModalOpen = true;
+      setFlash("error", msg);
+      busy = false;
+      render();
+    }
+  }
+
+  async function runCalendarImport(
+    calId: number,
+    file: File,
+    opts: { keepEditModalOpen?: boolean; successPrefix?: string } = {},
+  ): Promise<void> {
     busy = true;
     clearFlash();
     lastImportResult = null;
@@ -5417,7 +5510,7 @@ export function mountApp(root: HTMLElement): void {
       });
       setFlash(
         "success",
-        `Import finished for “${file.name}”: ${detail}.`,
+        `${opts.successPrefix || ""}Import finished for “${file.name}”: ${detail}.`,
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Import failed";
@@ -5426,6 +5519,7 @@ export function mountApp(root: HTMLElement): void {
       setImportPhase("error", { ok: false, resultMessage: msg });
       setFlash("error", msg);
     } finally {
+      if (opts.keepEditModalOpen) calModalOpen = true;
       busy = false;
       render();
     }
